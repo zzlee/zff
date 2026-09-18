@@ -98,7 +98,9 @@ int main(void) {
     printf("   Running zstr_videotestsrc (AVInputFormat) Tests  \n");
     printf("====================================================\n");
 
-    assert(zff_plugins_register_all() == 0);
+    int ret = zff_plugins_register_all();
+    assert(ret == 0);
+    (void)ret;
 
     test_videotestsrc_patterns();
     test_videotestsrc_timing();

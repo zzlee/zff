@@ -102,7 +102,9 @@ int main(void) {
     printf("   Running zstr_audiotestsrc (AVInputFormat) Tests  \n");
     printf("====================================================\n");
 
-    assert(zff_plugins_register_all() == 0);
+    int ret = zff_plugins_register_all();
+    assert(ret == 0);
+    (void)ret;
 
     test_audiotestsrc_waves();
     test_audiotestsrc_cadence();

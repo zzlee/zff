@@ -23,6 +23,7 @@ pkg_check_modules(AVFILTER REQUIRED libavfilter)
 pkg_check_modules(AVDEVICE REQUIRED libavdevice)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+pkg_check_modules(ALSA REQUIRED alsa)
 
 # Include directories
 include_directories(
@@ -34,6 +35,7 @@ include_directories(
     ${AVDEVICE_INCLUDE_DIRS}
     ${SWSCALE_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
+    ${ALSA_INCLUDE_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -58,6 +60,12 @@ set(PLUGINS_SOURCES
     src/plugins/zff_plugins.c
     src/plugins/video/zstr_videotestsrc.c
     src/plugins/audio/zstr_audiotestsrc.c
+    src/plugins/audio/zstr_aresample.c
+    src/plugins/video/zstr_scale.c
+    src/plugins/devices/zstr_v4l2.c
+    src/plugins/devices/zstr_alsa.c
+    src/plugins/devices/zstr_v4l2_sink.c
+    src/plugins/devices/zstr_alsa_sink.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -68,6 +76,9 @@ target_link_libraries(zff-plugins
     ${AVUTIL_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVFILTER_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+    ${ALSA_LIBRARIES}
     m
     pthread
 )
@@ -87,6 +98,30 @@ if(BUILD_TESTS)
     add_executable(test_audiotestsrc tests/test_audiotestsrc.c)
     target_link_libraries(test_audiotestsrc PRIVATE zff-plugins zff-core m)
     add_test(NAME test_audiotestsrc COMMAND test_audiotestsrc)
+
+    add_executable(test_aresample tests/test_aresample.c)
+    target_link_libraries(test_aresample PRIVATE zff-plugins zff-core ${SWRESAMPLE_LIBRARIES} m)
+    add_test(NAME test_aresample COMMAND test_aresample)
+
+    add_executable(test_scale tests/test_scale.c)
+    target_link_libraries(test_scale PRIVATE zff-plugins zff-core ${SWSCALE_LIBRARIES} m)
+    add_test(NAME test_scale COMMAND test_scale)
+
+    add_executable(test_v4l2 tests/test_v4l2.c)
+    target_link_libraries(test_v4l2 PRIVATE zff-plugins zff-core)
+    add_test(NAME test_v4l2 COMMAND test_v4l2)
+
+    add_executable(test_alsa tests/test_alsa.c)
+    target_link_libraries(test_alsa PRIVATE zff-plugins zff-core m)
+    add_test(NAME test_alsa COMMAND test_alsa)
+
+    add_executable(test_v4l2_sink tests/test_v4l2_sink.c)
+    target_link_libraries(test_v4l2_sink PRIVATE zff-plugins zff-core)
+    add_test(NAME test_v4l2_sink COMMAND test_v4l2_sink)
+
+    add_executable(test_alsa_sink tests/test_alsa_sink.c)
+    target_link_libraries(test_alsa_sink PRIVATE zff-plugins zff-core m)
+    add_test(NAME test_alsa_sink COMMAND test_alsa_sink)
 endif()
 
 message(STATUS "zff configured successfully.")

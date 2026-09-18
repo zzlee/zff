@@ -39,6 +39,18 @@ int zff_register_input_format(const AVInputFormat *fmt);
  */
 const AVInputFormat* zff_find_input_format(const char *name);
 
+/**
+ * Register a custom AVOutputFormat into the zff registry.
+ */
+int zff_register_output_format(const AVOutputFormat *fmt);
+
+/**
+ * Find an AVOutputFormat by name.
+ * Searches zff registered output formats first (e.g. "zstr_v4l2_sink", "zstr_alsa_sink"),
+ * and falls back to standard FFmpeg av_guess_format().
+ */
+const AVOutputFormat* zff_find_output_format(const char *name);
+
 #ifdef __cplusplus
 }
 #endif

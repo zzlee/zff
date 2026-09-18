@@ -75,6 +75,7 @@ set(PLUGINS_SOURCES
     src/plugins/audio/zstr_amix.c
     src/plugins/video/zstr_glsink.c
     src/plugins/video/zstr_text_overlay.c
+    src/plugins/video/zstr_gl_comp.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -146,6 +147,10 @@ if(BUILD_TESTS)
     add_executable(test_text_overlay tests/test_text_overlay.c)
     target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
     add_test(NAME test_text_overlay COMMAND test_text_overlay)
+
+    add_executable(test_gl_comp tests/test_gl_comp.c)
+    target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)
+    add_test(NAME test_gl_comp COMMAND test_gl_comp)
 endif()
 
 message(STATUS "zff configured successfully.")

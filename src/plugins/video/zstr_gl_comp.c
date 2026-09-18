@@ -5,6 +5,7 @@
 #define GL_GLEXT_PROTOTYPES 1
 
 #include "zff/plugins/zstr_gl_comp.h"
+#include "zff/plugins/zstr_gl_comp_engine.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
 #include <stdlib.h>

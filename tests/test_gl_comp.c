@@ -12,6 +12,7 @@
 #include <libavcodec/packet.h>
 
 #include "zff/plugins/zstr_gl_comp.h"
+#include "zff/plugins/zstr_gl_comp_engine.h"
 #include "zff/zff_core.h"
 
 static AVFrame* create_solid_frame(int w, int h, enum AVPixelFormat fmt, uint8_t r, uint8_t g, uint8_t b)

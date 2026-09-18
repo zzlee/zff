@@ -10,6 +10,7 @@
 #include <libavformat/avformat.h>
 
 #include "zff/plugins/zstr_st2110.h"
+#include "zff/plugins/zstr_st2110_toolkit.h"
 #include "zff/zff_core.h"
 
 static void test_st2110_20_video_roundtrip(void)

@@ -1,7 +1,7 @@
 /*=============================================================================
     zstr_st2022_7.c — SMPTE ST 2022-7 Seamless Hitless Redundancy Demuxer
 =============================================================================*/
-#include "zff/plugins/zstr_st2110.h"
+#include "zff/plugins/zstr_st2110_toolkit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -1,12 +1,8 @@
 /*=============================================================================
-    zstr_st2110.h — SMPTE ST 2110 Broadcast IP Video/Audio Suite & ST 2022-7 Redundancy
+    zstr_st2110.h — SMPTE ST 2110 Broadcast IP Devices (AVInputFormat / AVOutputFormat)
 =============================================================================*/
 #pragma once
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <libavutil/frame.h>
-#include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
 #include "zff/internal/zff_ffformat.h"
 
@@ -14,86 +10,35 @@
 extern "C" {
 #endif
 
-/* ---------------------------------------------------------------------------
- * ST 2110-20: RFC 4175 Uncompressed Video Payloader & Depayloader
- * --------------------------------------------------------------------------- */
-typedef struct zstr_st2110_20_payloader zstr_st2110_20_payloader_t;
-typedef struct zstr_st2110_20_depayloader zstr_st2110_20_depayloader_t;
-
-typedef struct {
-    int width;             /**< Video width */
-    int height;            /**< Video height */
-    enum AVPixelFormat fmt;/**< Pixel format (AV_PIX_FMT_YUV422P, AV_PIX_FMT_UYVY422, AV_PIX_FMT_RGB24) */
-    uint8_t payload_type;  /**< RTP Payload Type (default: 96) */
-    uint32_t ssrc;         /**< RTP SSRC */
-    int max_payload_bytes; /**< Max RTP payload bytes per packet (default: 1376) */
-} zstr_st2110_20_config_t;
-
-zstr_st2110_20_payloader_t* zstr_st2110_20_payloader_create(const zstr_st2110_20_config_t *cfg);
-int zstr_st2110_20_payloader_process(zstr_st2110_20_payloader_t *s,
-                                     const AVFrame *frame,
-                                     AVPacket ***out_pkts,
-                                     int *nb_out_pkts);
-void zstr_st2110_20_payloader_free_packets(AVPacket **pkts, int count);
-void zstr_st2110_20_payloader_free(zstr_st2110_20_payloader_t **s);
-
-zstr_st2110_20_depayloader_t* zstr_st2110_20_depayloader_create(const zstr_st2110_20_config_t *cfg);
-int zstr_st2110_20_depayloader_process(zstr_st2110_20_depayloader_t *s,
-                                       const AVPacket *rtp_pkt,
-                                       AVFrame *out_frame,
-                                       bool *ready);
-void zstr_st2110_20_depayloader_free(zstr_st2110_20_depayloader_t **s);
-
-/* ---------------------------------------------------------------------------
- * ST 2110-30: AES67 PCM Audio Payloader & Depayloader
- * --------------------------------------------------------------------------- */
-typedef struct zstr_st2110_30_payloader zstr_st2110_30_payloader_t;
-typedef struct zstr_st2110_30_depayloader zstr_st2110_30_depayloader_t;
-
-typedef struct {
-    int channels;          /**< Number of channels (1..8, default 2) */
-    int sample_rate;       /**< Sample rate (default 48000) */
-    int bit_depth;         /**< 16 or 24 bit PCM */
-    uint8_t payload_type;  /**< RTP Payload Type (default: 97) */
-    uint32_t ssrc;         /**< RTP SSRC */
-    int packet_time_us;    /**< Packet time in microseconds: 1000 (1ms) or 125 (0.125ms) */
-} zstr_st2110_30_config_t;
-
-zstr_st2110_30_payloader_t* zstr_st2110_30_payloader_create(const zstr_st2110_30_config_t *cfg);
-int zstr_st2110_30_payloader_process(zstr_st2110_30_payloader_t *s,
-                                     const AVFrame *frame,
-                                     AVPacket ***out_pkts,
-                                     int *nb_out_pkts);
-void zstr_st2110_30_payloader_free(zstr_st2110_30_payloader_t **s);
-
-zstr_st2110_30_depayloader_t* zstr_st2110_30_depayloader_create(const zstr_st2110_30_config_t *cfg);
-int zstr_st2110_30_depayloader_process(zstr_st2110_30_depayloader_t *s,
-                                       const AVPacket *rtp_pkt,
-                                       AVFrame *out_frame,
-                                       bool *ready);
-void zstr_st2110_30_depayloader_free(zstr_st2110_30_depayloader_t **s);
-
-/* ---------------------------------------------------------------------------
- * SMPTE ST 2022-7: Seamless Hitless Secondary Redundancy Demuxer
- * --------------------------------------------------------------------------- */
-typedef struct zstr_st2022_7_demux zstr_st2022_7_demux_t;
-
-zstr_st2022_7_demux_t* zstr_st2022_7_demux_create(void);
 /**
- * Push an incoming RTP packet from path A (primary=0) or path B (secondary=1).
- * If the packet is a duplicate, it is dropped (*is_duplicate = true).
- * If new, *is_duplicate = false, and caller can forward/process it.
+ * Standard FFmpeg AVInputFormat device for zstr_st2110_demux (ST 2110 Receiver).
+ *
+ * Usage via standard FFmpeg API:
+ *   avformat_open_input(&in_ctx, "udp://0.0.0.0:20000", zff_find_input_format("zstr_st2110_demux"), &options);
+ *   av_read_frame(in_ctx, pkt);
+ *   avformat_close_input(&in_ctx);
+ *
+ * Supported AVDictionary options:
+ *   - "host": string (Bind IP address)
+ *   - "port": int (Bind UDP port)
  */
-int zstr_st2022_7_demux_process(zstr_st2022_7_demux_t *s,
-                                int path_idx,
-                                const AVPacket *in_pkt,
-                                bool *is_duplicate);
-void zstr_st2022_7_demux_free(zstr_st2022_7_demux_t **s);
-
-/* ---------------------------------------------------------------------------
- * FFmpeg AVInputFormat & AVOutputFormat
- * --------------------------------------------------------------------------- */
 extern const AVInputFormat ff_zstr_st2110_demuxer;
+
+/**
+ * Standard FFmpeg FFOutputFormat device for zstr_st2110_mux (ST 2110 Sender).
+ *
+ * Usage via standard FFmpeg API:
+ *   avformat_alloc_output_context2(&out_ctx, zff_find_output_format("zstr_st2110_mux"), NULL, "udp://127.0.0.1:20000");
+ *   avformat_write_header(out_ctx, &options);
+ *   av_write_frame(out_ctx, pkt);
+ *   av_write_trailer(out_ctx);
+ *   avformat_free_context(out_ctx);
+ *
+ * Supported AVDictionary options:
+ *   - "host": string (Destination IP address)
+ *   - "port": int (Destination UDP port)
+ *   - "pt": int (RTP Payload Type: 96 for video, 97 for audio)
+ */
 extern const FFOutputFormat ff_zstr_st2110_muxer;
 
 #ifdef __cplusplus

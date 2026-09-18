@@ -1,7 +1,7 @@
 /*=============================================================================
     zstr_st2110_20.c — SMPTE ST 2110-20 Video Payloader & Depayloader (RFC 4175)
 =============================================================================*/
-#include "zff/plugins/zstr_st2110.h"
+#include "zff/plugins/zstr_st2110_toolkit.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
 #include <stdlib.h>

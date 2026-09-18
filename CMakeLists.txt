@@ -80,6 +80,10 @@ set(PLUGINS_SOURCES
     src/plugins/streaming/zstr_net_sink.c
     src/plugins/streaming/zstr_rtp_payloader.c
     src/plugins/streaming/zstr_rtp_depayloader.c
+    src/plugins/broadcast/zstr_st2110_20.c
+    src/plugins/broadcast/zstr_st2110_30.c
+    src/plugins/broadcast/zstr_st2022_7.c
+    src/plugins/broadcast/zstr_st2110_device.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -163,6 +167,10 @@ if(BUILD_TESTS)
     add_executable(test_rtp tests/test_rtp.c)
     target_link_libraries(test_rtp PRIVATE zff-plugins zff-core)
     add_test(NAME test_rtp COMMAND test_rtp)
+
+    add_executable(test_st2110 tests/test_st2110.c)
+    target_link_libraries(test_st2110 PRIVATE zff-plugins zff-core pthread)
+    add_test(NAME test_st2110 COMMAND test_st2110)
 endif()
 
 message(STATUS "zff configured successfully.")

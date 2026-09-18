@@ -1,0 +1,64 @@
+#===============================================================================
+#  zff — x86_64 Builder Dockerfile (Ubuntu 24.04 LTS)
+#===============================================================================
+
+FROM ubuntu:24.04 AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── Base toolchain ────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    ca-certificates \
+    curl \
+    git \
+    zip \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── FFmpeg libraries & Pro-AV dependencies ───────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libavformat-dev \
+    libavcodec-dev \
+    libavfilter-dev \
+    libavutil-dev \
+    libavdevice-dev \
+    libswscale-dev \
+    libswresample-dev \
+    ffmpeg \
+    libasound2-dev \
+    libv4l-dev \
+    libdrm-dev \
+    libgl1-mesa-dev \
+    libglx-dev \
+    libx11-dev \
+    libxext-dev \
+    xvfb \
+    libssl-dev \
+    libsrt-gnutls-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Debugging & validation tools ─────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gdb \
+    valgrind \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# ── Interactive developer image ──────────────────────────────────────────────
+FROM deps AS dev
+CMD ["/bin/bash"]
+
+# ── Standalone CI verification image ─────────────────────────────────────────
+FROM deps AS ci
+COPY . /workspace
+RUN mkdir -p /workspace/build && cd /workspace/build && \
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON .. && \
+    ninja
+WORKDIR /workspace/build
+CMD ["ctest", "--output-on-failure"]

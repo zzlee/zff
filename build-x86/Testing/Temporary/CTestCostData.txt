@@ -1,0 +1,4 @@
+test_core 3 0.00631865
+test_videotestsrc 2 0.0220343
+test_audiotestsrc 2 0.0185016
+---

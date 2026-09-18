@@ -114,23 +114,27 @@ Because `av_packet_get_side_data()` matches integers directly without bounds che
 #define ZSTR_TAG_USER  ((enum AVFrameSideDataType)MKTAG('Z', 'U', 'S', 'R'))
 ```
 
-### 3.2 Multi-Item Embedding Strategies
+### 3.2 Standard Specification: FourCC Tag Branching (分流 Tag 法)
 
-#### Strategy A: Distinct FourCC Tags (Recommended)
-Add distinct items with unique tags. Each can be retrieved independently with $O(1)$ lookup:
+`zff` strictly adopts the **FourCC Tag Branching** approach as its standard user-data embedding mechanism across both `AVFrame` and `AVPacket`.
+
+Each distinct domain/business payload is assigned an explicit, globally unique FourCC identifier. This ensures:
+1. **Zero Demuxing Overhead**: Each downstream plugin queries precisely its required metadata using $O(1)$ lookups without parsing TLV containers.
+2. **Native FFmpeg Compatibility**: Fully leverages `av_frame_get_side_data()` and `av_packet_get_side_data()`.
+3. **Decoupled Lifecycles**: Modules can add, inspect, or drop individual side data entries independently.
+
+#### Usage Example:
 ```c
-// Adding PTP timestamp
-AVFrameSideData *sd_ptp = av_frame_new_side_data(frame, ZSTR_TAG_PTP, sizeof(zff_ptp_time_t));
-// Adding AI Bounding Box
+// 1. Ingest / Producer: Embedding multiple user-data via distinct FourCC tags
+AVFrameSideData *sd_ptp  = av_frame_new_side_data(frame, ZSTR_TAG_PTP, sizeof(zff_ptp_time_t));
 AVFrameSideData *sd_bbox = av_frame_new_side_data(frame, ZSTR_TAG_BBOX, sizeof(zff_bbox_t));
-```
 
-#### Strategy B: TLV Bundling (When atomic lifecycle is required)
-When multiple attributes must stay strictly grouped in a single side-data entry:
-```
-[ Header: Magic ('ZSTR'), ItemCount: 2, TotalSize: N ]
-  ├── SubItem 1: [ SubType: 0x01, Len: 24, Payload: NvBuf Metadata ]
-  └── SubItem 2: [ SubType: 0x02, Len: 16, Payload: PTP Timestamp ]
+// 2. Downstream / Consumer: Direct O(1) retrieval without interference
+AVFrameSideData *found = av_frame_get_side_data(frame, ZSTR_TAG_PTP);
+if (found) {
+    zff_ptp_time_t *ptp = (zff_ptp_time_t *)found->data;
+    // Process PTP timestamp directly...
+}
 ```
 
 ---

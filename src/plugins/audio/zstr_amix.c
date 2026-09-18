@@ -363,9 +363,12 @@ int zstr_amix_mix(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame 
 
     /* Metadata propagation */
     if (in[0]) {
+        av_frame_copy_props(out, in[0]);
+        out->sample_rate = m->sample_rate;
+        out->format = m->out_sample_fmt;
+        av_channel_layout_copy(&out->ch_layout, &m->out_layout);
         out->pts = in[0]->pts;
         out->duration = max_samples;
-        av_frame_copy_props(out, in[0]);
     }
 
     /* Clean up temporary resampled frames */

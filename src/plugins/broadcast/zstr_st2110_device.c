@@ -46,10 +46,28 @@ static int st2110_write_header(AVFormatContext *s)
 {
     ST2110MuxContext *ctx = s->priv_data;
 
+    char host_buf[128] = {0};
+    const char *dest_host = ctx->host ? ctx->host : "127.0.0.1";
+    uint16_t dest_port = (uint16_t)(ctx->port ? ctx->port : 20000);
+
+    if (s->url && s->url[0]) {
+        const char *proto_sep = strstr(s->url, "://");
+        const char *hp = proto_sep ? (proto_sep + 3) : s->url;
+        const char *colon = strrchr(hp, ':');
+        if (colon) {
+            size_t hlen = colon - hp;
+            if (hlen > 0 && hlen < sizeof(host_buf)) {
+                strncpy(host_buf, hp, hlen);
+                dest_host = host_buf;
+            }
+            dest_port = (uint16_t)atoi(colon + 1);
+        }
+    }
+
     zstr_net_config_t net_cfg = {
         .protocol = ZSTR_NET_PROTO_UDP,
-        .host = ctx->host ? ctx->host : "127.0.0.1",
-        .port = (uint16_t)(ctx->port ? ctx->port : 20000),
+        .host = dest_host,
+        .port = dest_port,
         .buffer_size = 65536,
         .timeout_ms = 1000
     };
@@ -85,7 +103,8 @@ static int st2110_write_packet(AVFormatContext *s, AVPacket *pkt)
     if (!ctx || !ctx->net_sink || !pkt) return 0;
 
     /* Write directly over network sink */
-    return zstr_net_sink_write_packet(ctx->net_sink, pkt);
+    int ret = zstr_net_sink_write_packet(ctx->net_sink, pkt);
+    return ret >= 0 ? 0 : ret;
 }
 
 static int st2110_write_trailer(AVFormatContext *s)
@@ -146,10 +165,29 @@ static const AVClass zstr_st2110_demux_class = {
 static int st2110_read_header(AVFormatContext *s)
 {
     ST2110DemuxContext *ctx = s->priv_data;
+
+    char host_buf[128] = {0};
+    const char *bind_host = ctx->host ? ctx->host : "0.0.0.0";
+    uint16_t bind_port = (uint16_t)(ctx->port ? ctx->port : 20000);
+
+    if (s->url && s->url[0]) {
+        const char *proto_sep = strstr(s->url, "://");
+        const char *hp = proto_sep ? (proto_sep + 3) : s->url;
+        const char *colon = strrchr(hp, ':');
+        if (colon) {
+            size_t hlen = colon - hp;
+            if (hlen > 0 && hlen < sizeof(host_buf)) {
+                strncpy(host_buf, hp, hlen);
+                bind_host = host_buf;
+            }
+            bind_port = (uint16_t)atoi(colon + 1);
+        }
+    }
+
     zstr_net_config_t cfg = {
         .protocol = ZSTR_NET_PROTO_UDP,
-        .host = ctx->host ? ctx->host : "0.0.0.0",
-        .port = (uint16_t)(ctx->port ? ctx->port : 20000),
+        .host = bind_host,
+        .port = bind_port,
         .buffer_size = 65536,
         .timeout_ms = 1000
     };

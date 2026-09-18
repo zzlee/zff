@@ -73,20 +73,20 @@ int zstr_st2022_7_demux_process(zstr_st2022_7_demux_t *s,
         return 0;
     }
 
-    /* Check if duplicate */
-    if (test_and_set_bit(s->seen_bitmap, seq)) {
-        s->duplicate_packets++;
-        *is_duplicate = true;
-        pthread_mutex_unlock(&s->lock);
-        return 0;
-    }
-
     /* Clear ahead if sequence advances significantly to prevent false duplicates on wrap-around */
     int16_t diff = (int16_t)(seq - s->highest_seq);
     if (diff > 0) {
         if (diff > SEQ_WINDOW_SIZE) diff = SEQ_WINDOW_SIZE;
         clear_seq_range(s->seen_bitmap, (uint16_t)(s->highest_seq + 1), (uint16_t)diff);
         s->highest_seq = seq;
+    }
+
+    /* Check if duplicate */
+    if (test_and_set_bit(s->seen_bitmap, seq)) {
+        s->duplicate_packets++;
+        *is_duplicate = true;
+        pthread_mutex_unlock(&s->lock);
+        return 0;
     }
 
     *is_duplicate = false;

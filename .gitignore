@@ -26,3 +26,4 @@ Makefile
 *.log
 tmp/
 scratch/
+build*/

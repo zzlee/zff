@@ -27,6 +27,8 @@ pkg_check_modules(ALSA REQUIRED alsa)
 pkg_check_modules(GL REQUIRED gl)
 pkg_check_modules(X11 REQUIRED x11)
 pkg_check_modules(FREETYPE freetype2)
+find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
+find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
 
 # Include directories
 include_directories(
@@ -42,6 +44,7 @@ include_directories(
     ${GL_INCLUDE_DIRS}
     ${X11_INCLUDE_DIRS}
     ${FREETYPE_INCLUDE_DIRS}
+    ${SRT_INCLUDE_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -84,6 +87,10 @@ set(PLUGINS_SOURCES
     src/plugins/broadcast/zstr_st2110_30.c
     src/plugins/broadcast/zstr_st2022_7.c
     src/plugins/broadcast/zstr_st2110_device.c
+    src/plugins/streaming/zstr_srt_parser.c
+    src/plugins/streaming/zstr_srt_common.c
+    src/plugins/streaming/zstr_srt_source.c
+    src/plugins/streaming/zstr_srt_sink.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -100,6 +107,7 @@ target_link_libraries(zff-plugins
     ${GL_LIBRARIES}
     ${X11_LIBRARIES}
     ${FREETYPE_LIBRARIES}
+    ${SRT_LIBRARIES}
     m
     pthread
 )
@@ -171,6 +179,10 @@ if(BUILD_TESTS)
     add_executable(test_st2110 tests/test_st2110.c)
     target_link_libraries(test_st2110 PRIVATE zff-plugins zff-core pthread)
     add_test(NAME test_st2110 COMMAND test_st2110)
+
+    add_executable(test_srt tests/test_srt.c)
+    target_link_libraries(test_srt PRIVATE zff-plugins zff-core ${SRT_LIBRARIES} pthread)
+    add_test(NAME test_srt COMMAND test_srt)
 endif()
 
 message(STATUS "zff configured successfully.")

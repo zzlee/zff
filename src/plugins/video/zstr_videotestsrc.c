@@ -1,33 +1,71 @@
 /*=============================================================================
-    zstr_videotestsrc.c — Synthetic Video Test Signal Generator for FFmpeg
+    zstr_videotestsrc.c — Video Test Source Input Device (AVInputFormat)
 =============================================================================*/
 #include "zff/plugins/zstr_videotestsrc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/mem.h>
 #include <libavutil/opt.h>
-#include <libavfilter/buffersrc.h>
+#include <libavutil/parseutils.h>
+#include <libavformat/avformat.h>
 
-#define OFFSET(x) offsetof(zstr_videotestsrc_t, x)
-#define FLAGS AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
+#define QUEUE_CAPACITY 32
+
+typedef enum {
+    PATTERN_BARS = 0,
+    PATTERN_GRADIENT,
+    PATTERN_CHECKERBOARD,
+    PATTERN_NOISE,
+    PATTERN_BLACK
+} VideoPattern;
+
+typedef struct VideoTestSrcContext {
+    const AVClass *av_class;
+
+    char *video_size;
+    char *framerate;
+    int pattern;
+    int realtime;
+    int64_t num_frames;
+
+    int width;
+    int height;
+    AVRational frame_rate;
+    int frame_size;
+
+    /* Background worker thread & packet queue */
+    pthread_t worker_thread;
+    pthread_mutex_t lock;
+    pthread_cond_t cond_not_empty;
+    pthread_cond_t cond_not_full;
+    int thread_started;
+    int stop_requested;
+    int eof_reached;
+
+    AVPacket *queue[QUEUE_CAPACITY];
+    int q_head;
+    int q_tail;
+    int q_count;
+} VideoTestSrcContext;
+
+#define OFFSET(x) offsetof(VideoTestSrcContext, x)
+#define DEC AV_OPT_FLAG_DECODING_PARAM
 
 static const AVOption zstr_videotestsrc_options[] = {
-    { "w",          "Video width",             OFFSET(width),       AV_OPT_TYPE_INT,        { .i64 = 1920 }, 16, 8192, FLAGS },
-    { "width",      "Video width",             OFFSET(width),       AV_OPT_TYPE_INT,        { .i64 = 1920 }, 16, 8192, FLAGS },
-    { "h",          "Video height",            OFFSET(height),      AV_OPT_TYPE_INT,        { .i64 = 1080 }, 16, 8192, FLAGS },
-    { "height",     "Video height",            OFFSET(height),      AV_OPT_TYPE_INT,        { .i64 = 1080 }, 16, 8192, FLAGS },
-    { "rate",       "Framerate",               OFFSET(frame_rate),  AV_OPT_TYPE_VIDEO_RATE, { .str = "30" }, 0, INT_MAX, FLAGS },
-    { "r",          "Framerate",               OFFSET(frame_rate),  AV_OPT_TYPE_VIDEO_RATE, { .str = "30" }, 0, INT_MAX, FLAGS },
-    { "pattern",    "Test pattern",            OFFSET(pattern),     AV_OPT_TYPE_INT,        { .i64 = ZSTR_VIDEO_PATTERN_BARS }, 0, 4, FLAGS, "pattern" },
-        { "bars",         "SMPTE color bars",    0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_VIDEO_PATTERN_BARS },         0, 0, FLAGS, "pattern" },
-        { "gradient",     "Horizontal gradient", 0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_VIDEO_PATTERN_GRADIENT },     0, 0, FLAGS, "pattern" },
-        { "checkerboard", "Checkerboard",        0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_VIDEO_PATTERN_CHECKERBOARD }, 0, 0, FLAGS, "pattern" },
-        { "noise",        "Uniform noise",       0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_VIDEO_PATTERN_NOISE },        0, 0, FLAGS, "pattern" },
-        { "black",        "Solid black",         0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_VIDEO_PATTERN_BLACK },        0, 0, FLAGS, "pattern" },
-    { "pix_fmt",    "Pixel format",            OFFSET(pix_fmt),     AV_OPT_TYPE_PIXEL_FMT,  { .i64 = AV_PIX_FMT_YUV420P }, 0, INT_MAX, FLAGS },
-    { "num_frames", "Max frames to output",    OFFSET(num_frames),  AV_OPT_TYPE_INT64,      { .i64 = 0 }, 0, INT64_MAX, FLAGS },
+    { "video_size", "Frame size (e.g. 1920x1080, hd720)", OFFSET(video_size), AV_OPT_TYPE_STRING, { .str = "1280x720" }, 0, 0, DEC },
+    { "framerate",  "Video framerate",                    OFFSET(framerate),  AV_OPT_TYPE_STRING, { .str = "30" },       0, 0, DEC },
+    { "pattern",    "Test pattern",                        OFFSET(pattern),    AV_OPT_TYPE_INT,    { .i64 = PATTERN_BARS }, 0, 4, DEC, "pattern" },
+        { "bars",         "SMPTE color bars",    0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_BARS },         0, 0, DEC, "pattern" },
+        { "gradient",     "Horizontal gradient", 0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_GRADIENT },     0, 0, DEC, "pattern" },
+        { "checkerboard", "Checkerboard",        0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_CHECKERBOARD }, 0, 0, DEC, "pattern" },
+        { "noise",        "Uniform noise",       0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_NOISE },        0, 0, DEC, "pattern" },
+        { "black",        "Solid black",         0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_BLACK },        0, 0, DEC, "pattern" },
+    { "realtime",   "Real-time clock pacing (1=on, 0=burst)", OFFSET(realtime), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, DEC },
+    { "num_frames", "Max frames to generate (0=infinite)",    OFFSET(num_frames), AV_OPT_TYPE_INT64, { .i64 = 0 }, 0, INT64_MAX, DEC },
     { NULL }
 };
 
@@ -38,7 +76,6 @@ static const AVClass zstr_videotestsrc_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-/* ── 8-Bar SMPTE color values in 8-bit YUV ────────────────────────────── */
 static const uint8_t smpte_yuv[8][3] = {
     { 235, 128, 128 }, /* White */
     { 210,  16, 146 }, /* Yellow */
@@ -50,191 +87,239 @@ static const uint8_t smpte_yuv[8][3] = {
     {  16, 128, 128 }  /* Black */
 };
 
-static void render_bars_yuv420p(zstr_videotestsrc_t *s, uint8_t *y, int y_stride,
-                                uint8_t *u, int u_stride, uint8_t *v, int v_stride) {
-    int bar_width = s->width / 8;
-    for (int r = 0; r < s->height; r++) {
-        for (int c = 0; c < s->width; c++) {
-            int bar_idx = c / bar_width;
-            if (bar_idx > 7) bar_idx = 7;
-            y[r * y_stride + c] = smpte_yuv[bar_idx][0];
-            if ((r % 2 == 0) && (c % 2 == 0)) {
-                int uv_r = r / 2;
-                int uv_c = c / 2;
-                u[uv_r * u_stride + uv_c] = smpte_yuv[bar_idx][1];
-                v[uv_r * v_stride + uv_c] = smpte_yuv[bar_idx][2];
+static void render_frame_yuv420p(VideoTestSrcContext *ctx, uint8_t *data) {
+    int w = ctx->width;
+    int h = ctx->height;
+    uint8_t *y = data;
+    uint8_t *u = data + (w * h);
+    uint8_t *v = u + (w * h / 4);
+
+    switch (ctx->pattern) {
+        case PATTERN_BARS: {
+            int bar_w = w / 8;
+            for (int r = 0; r < h; r++) {
+                for (int c = 0; c < w; c++) {
+                    int b = c / bar_w;
+                    if (b > 7) b = 7;
+                    y[r * w + c] = smpte_yuv[b][0];
+                    if ((r % 2 == 0) && (c % 2 == 0)) {
+                        u[(r / 2) * (w / 2) + (c / 2)] = smpte_yuv[b][1];
+                        v[(r / 2) * (w / 2) + (c / 2)] = smpte_yuv[b][2];
+                    }
+                }
             }
+            break;
         }
-    }
-}
-
-static void render_gradient_yuv420p(zstr_videotestsrc_t *s, uint8_t *y, int y_stride,
-                                    uint8_t *u, int u_stride, uint8_t *v, int v_stride) {
-    for (int r = 0; r < s->height; r++) {
-        for (int c = 0; c < s->width; c++) {
-            y[r * y_stride + c] = (uint8_t)((c * 235) / (s->width > 1 ? s->width - 1 : 1) + 16);
-            if ((r % 2 == 0) && (c % 2 == 0)) {
-                int uv_r = r / 2;
-                int uv_c = c / 2;
-                u[uv_r * u_stride + uv_c] = 128;
-                v[uv_r * v_stride + uv_c] = 128;
+        case PATTERN_GRADIENT: {
+            for (int r = 0; r < h; r++) {
+                for (int c = 0; c < w; c++) {
+                    y[r * w + c] = (uint8_t)((c * 219) / (w > 1 ? w - 1 : 1) + 16);
+                    if ((r % 2 == 0) && (c % 2 == 0)) {
+                        u[(r / 2) * (w / 2) + (c / 2)] = 128;
+                        v[(r / 2) * (w / 2) + (c / 2)] = 128;
+                    }
+                }
             }
+            break;
         }
-    }
-}
-
-static void render_checkerboard_yuv420p(zstr_videotestsrc_t *s, uint8_t *y, int y_stride,
-                                        uint8_t *u, int u_stride, uint8_t *v, int v_stride) {
-    const int tile_size = 32;
-    for (int r = 0; r < s->height; r++) {
-        for (int c = 0; c < s->width; c++) {
-            int tile = ((r / tile_size) ^ (c / tile_size)) & 1;
-            y[r * y_stride + c] = tile ? 235 : 16;
-            if ((r % 2 == 0) && (c % 2 == 0)) {
-                int uv_r = r / 2;
-                int uv_c = c / 2;
-                u[uv_r * u_stride + uv_c] = 128;
-                v[uv_r * v_stride + uv_c] = 128;
+        case PATTERN_CHECKERBOARD: {
+            const int tile = 32;
+            for (int r = 0; r < h; r++) {
+                for (int c = 0; c < w; c++) {
+                    y[r * w + c] = (((r / tile) ^ (c / tile)) & 1) ? 235 : 16;
+                    if ((r % 2 == 0) && (c % 2 == 0)) {
+                        u[(r / 2) * (w / 2) + (c / 2)] = 128;
+                        v[(r / 2) * (w / 2) + (c / 2)] = 128;
+                    }
+                }
             }
+            break;
         }
-    }
-}
-
-static void render_noise_yuv420p(zstr_videotestsrc_t *s, uint8_t *y, int y_stride,
-                                 uint8_t *u, int u_stride, uint8_t *v, int v_stride) {
-    for (int r = 0; r < s->height; r++) {
-        for (int c = 0; c < s->width; c++) {
-            y[r * y_stride + c] = (uint8_t)(rand() % 256);
-            if ((r % 2 == 0) && (c % 2 == 0)) {
-                int uv_r = r / 2;
-                int uv_c = c / 2;
-                u[uv_r * u_stride + uv_c] = (uint8_t)(rand() % 256);
-                v[uv_r * v_stride + uv_c] = (uint8_t)(rand() % 256);
+        case PATTERN_NOISE: {
+            for (int i = 0; i < w * h; i++) y[i] = (uint8_t)(rand() % 256);
+            for (int i = 0; i < (w * h) / 4; i++) {
+                u[i] = (uint8_t)(rand() % 256);
+                v[i] = (uint8_t)(rand() % 256);
             }
+            break;
+        }
+        case PATTERN_BLACK:
+        default: {
+            memset(y, 16, w * h);
+            memset(u, 128, (w * h) / 4);
+            memset(v, 128, (w * h) / 4);
+            break;
         }
     }
 }
 
-static void render_black_yuv420p(zstr_videotestsrc_t *s, uint8_t *y, int y_stride,
-                                 uint8_t *u, int u_stride, uint8_t *v, int v_stride) {
-    for (int r = 0; r < s->height; r++) {
-        memset(y + r * y_stride, 16, s->width);
+static void* videotestsrc_worker(void *arg) {
+    VideoTestSrcContext *ctx = (VideoTestSrcContext*)arg;
+    int64_t frame_count = 0;
+
+    int64_t interval_ns = (1000000000LL * ctx->frame_rate.den) / ctx->frame_rate.num;
+    struct timespec next_time;
+    clock_gettime(CLOCK_MONOTONIC, &next_time);
+
+    while (1) {
+        pthread_mutex_lock(&ctx->lock);
+        if (ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            break;
+        }
+        if (ctx->num_frames > 0 && frame_count >= ctx->num_frames) {
+            ctx->eof_reached = 1;
+            pthread_cond_broadcast(&ctx->cond_not_empty);
+            pthread_mutex_unlock(&ctx->lock);
+            break;
+        }
+
+        while (ctx->q_count == QUEUE_CAPACITY && !ctx->stop_requested) {
+            pthread_cond_wait(&ctx->cond_not_full, &ctx->lock);
+        }
+        if (ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            break;
+        }
+        pthread_mutex_unlock(&ctx->lock);
+
+        /* Real-time pacing */
+        if (ctx->realtime) {
+            next_time.tv_nsec += interval_ns;
+            while (next_time.tv_nsec >= 1000000000L) {
+                next_time.tv_sec += 1;
+                next_time.tv_nsec -= 1000000000L;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
+        }
+
+        AVPacket *pkt = av_packet_alloc();
+        if (!pkt) break;
+        if (av_new_packet(pkt, ctx->frame_size) < 0) {
+            av_packet_free(&pkt);
+            break;
+        }
+
+        render_frame_yuv420p(ctx, pkt->data);
+        pkt->pts = frame_count;
+        pkt->dts = frame_count;
+        pkt->stream_index = 0;
+        frame_count++;
+
+        pthread_mutex_lock(&ctx->lock);
+        ctx->queue[ctx->q_tail] = pkt;
+        ctx->q_tail = (ctx->q_tail + 1) % QUEUE_CAPACITY;
+        ctx->q_count++;
+        pthread_cond_signal(&ctx->cond_not_empty);
+        pthread_mutex_unlock(&ctx->lock);
     }
-    for (int r = 0; r < s->height / 2; r++) {
-        memset(u + r * u_stride, 128, s->width / 2);
-        memset(v + r * v_stride, 128, s->width / 2);
-    }
+    return NULL;
 }
 
-zstr_videotestsrc_t* zstr_videotestsrc_alloc(const char *opt_string) {
-    zstr_videotestsrc_t *s = av_mallocz(sizeof(zstr_videotestsrc_t));
-    if (!s) return NULL;
+static int videotestsrc_read_header(AVFormatContext *s) {
+    VideoTestSrcContext *ctx = s->priv_data;
 
-    s->av_class = &zstr_videotestsrc_class;
-    av_opt_set_defaults(s);
-
-    if (opt_string && *opt_string) {
-        if (av_set_options_string(s, opt_string, "=", ":") < 0) {
-            zstr_videotestsrc_free(&s);
-            return NULL;
-        }
+    if (av_parse_video_size(&ctx->width, &ctx->height, ctx->video_size) < 0) {
+        av_log(s, AV_LOG_ERROR, "Invalid video_size: %s\n", ctx->video_size);
+        return AVERROR(EINVAL);
     }
 
-    if (s->frame_rate.num <= 0 || s->frame_rate.den <= 0) {
-        s->frame_rate = (AVRational){ 30, 1 };
+    if (av_parse_video_rate(&ctx->frame_rate, ctx->framerate) < 0 ||
+        ctx->frame_rate.num <= 0 || ctx->frame_rate.den <= 0) {
+        av_log(s, AV_LOG_ERROR, "Invalid framerate: %s\n", ctx->framerate);
+        return AVERROR(EINVAL);
     }
 
-    return s;
-}
+    ctx->frame_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, ctx->width, ctx->height, 1);
+    if (ctx->frame_size < 0) return ctx->frame_size;
 
-int zstr_videotestsrc_read_frame(zstr_videotestsrc_t *s, AVFrame *frame) {
-    if (!s || !frame) return AVERROR(EINVAL);
+    AVStream *st = avformat_new_stream(s, NULL);
+    if (!st) return AVERROR(ENOMEM);
 
-    if (s->num_frames > 0 && s->frame_count >= s->num_frames) {
-        return AVERROR_EOF;
+    st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    st->codecpar->codec_id   = AV_CODEC_ID_RAWVIDEO;
+    st->codecpar->width      = ctx->width;
+    st->codecpar->height     = ctx->height;
+    st->codecpar->format     = AV_PIX_FMT_YUV420P;
+    st->time_base            = av_inv_q(ctx->frame_rate);
+
+    pthread_mutex_init(&ctx->lock, NULL);
+    pthread_cond_init(&ctx->cond_not_empty, NULL);
+    pthread_cond_init(&ctx->cond_not_full, NULL);
+
+    ctx->q_head = 0;
+    ctx->q_tail = 0;
+    ctx->q_count = 0;
+    ctx->stop_requested = 0;
+    ctx->eof_reached = 0;
+
+    if (pthread_create(&ctx->worker_thread, NULL, videotestsrc_worker, ctx) != 0) {
+        return AVERROR(EIO);
     }
-
-    frame->width = s->width;
-    frame->height = s->height;
-    frame->format = s->pix_fmt;
-    frame->pts = s->frame_count;
-
-    int ret = av_frame_get_buffer(frame, 32);
-    if (ret < 0) return ret;
-
-    ret = av_frame_make_writable(frame);
-    if (ret < 0) return ret;
-
-    if (s->pix_fmt == AV_PIX_FMT_YUV420P) {
-        uint8_t *y = frame->data[0];
-        uint8_t *u = frame->data[1];
-        uint8_t *v = frame->data[2];
-        int y_stride = frame->linesize[0];
-        int u_stride = frame->linesize[1];
-        int v_stride = frame->linesize[2];
-
-        switch (s->pattern) {
-            case ZSTR_VIDEO_PATTERN_BARS:
-                render_bars_yuv420p(s, y, y_stride, u, u_stride, v, v_stride);
-                break;
-            case ZSTR_VIDEO_PATTERN_GRADIENT:
-                render_gradient_yuv420p(s, y, y_stride, u, u_stride, v, v_stride);
-                break;
-            case ZSTR_VIDEO_PATTERN_CHECKERBOARD:
-                render_checkerboard_yuv420p(s, y, y_stride, u, u_stride, v, v_stride);
-                break;
-            case ZSTR_VIDEO_PATTERN_NOISE:
-                render_noise_yuv420p(s, y, y_stride, u, u_stride, v, v_stride);
-                break;
-            case ZSTR_VIDEO_PATTERN_BLACK:
-            default:
-                render_black_yuv420p(s, y, y_stride, u, u_stride, v, v_stride);
-                break;
-        }
-    } else {
-        /* Generic fallback: render to temp YUV420P buffer, then copy/convert */
-        size_t needed = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, s->width, s->height, 1);
-        if (!s->tmp_yuv420p || s->tmp_size < needed) {
-            av_free(s->tmp_yuv420p);
-            s->tmp_yuv420p = av_malloc(needed);
-            s->tmp_size = needed;
-        }
-
-        uint8_t *ptrs[4];
-        int linesizes[4];
-        av_image_fill_arrays(ptrs, linesizes, s->tmp_yuv420p, AV_PIX_FMT_YUV420P, s->width, s->height, 1);
-
-        render_bars_yuv420p(s, ptrs[0], linesizes[0], ptrs[1], linesizes[1], ptrs[2], linesizes[2]);
-        av_image_copy(frame->data, frame->linesize, (const uint8_t **)ptrs, linesizes, s->pix_fmt, s->width, s->height);
-    }
-
-    s->frame_count++;
+    ctx->thread_started = 1;
     return 0;
 }
 
-int zstr_videotestsrc_attach_to_graph(zstr_videotestsrc_t *s,
-                                      AVFilterGraph *graph,
-                                      AVFilterContext **out_src_ctx) {
-    if (!s || !graph || !out_src_ctx) return AVERROR(EINVAL);
+static int videotestsrc_read_packet(AVFormatContext *s, AVPacket *pkt) {
+    VideoTestSrcContext *ctx = s->priv_data;
 
-    const AVFilter *buffer_filter = avfilter_get_by_name("buffer");
-    if (!buffer_filter) return AVERROR_FILTER_NOT_FOUND;
-
-    char args[512];
-    AVRational time_base = av_inv_q(s->frame_rate);
-    snprintf(args, sizeof(args),
-             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1",
-             s->width, s->height, s->pix_fmt, time_base.num, time_base.den);
-
-    int ret = avfilter_graph_create_filter(out_src_ctx, buffer_filter,
-                                          "zstr_videotestsrc", args, NULL, graph);
-    return ret;
-}
-
-void zstr_videotestsrc_free(zstr_videotestsrc_t **s) {
-    if (s && *s) {
-        av_opt_free(*s);
-        av_free((*s)->tmp_yuv420p);
-        av_freep(s);
+    pthread_mutex_lock(&ctx->lock);
+    while (ctx->q_count == 0) {
+        if (ctx->eof_reached || ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            return AVERROR_EOF;
+        }
+        pthread_cond_wait(&ctx->cond_not_empty, &ctx->lock);
     }
+
+    AVPacket *queued = ctx->queue[ctx->q_head];
+    ctx->queue[ctx->q_head] = NULL;
+    ctx->q_head = (ctx->q_head + 1) % QUEUE_CAPACITY;
+    ctx->q_count--;
+
+    pthread_cond_signal(&ctx->cond_not_full);
+    pthread_mutex_unlock(&ctx->lock);
+
+    av_packet_move_ref(pkt, queued);
+    av_packet_free(&queued);
+    return 0;
 }
+
+static int videotestsrc_read_close(AVFormatContext *s) {
+    VideoTestSrcContext *ctx = s->priv_data;
+    if (ctx->thread_started) {
+        pthread_mutex_lock(&ctx->lock);
+        ctx->stop_requested = 1;
+        pthread_cond_broadcast(&ctx->cond_not_empty);
+        pthread_cond_broadcast(&ctx->cond_not_full);
+        pthread_mutex_unlock(&ctx->lock);
+
+        pthread_join(ctx->worker_thread, NULL);
+        ctx->thread_started = 0;
+    }
+
+    pthread_mutex_lock(&ctx->lock);
+    while (ctx->q_count > 0) {
+        AVPacket *pkt = ctx->queue[ctx->q_head];
+        ctx->q_head = (ctx->q_head + 1) % QUEUE_CAPACITY;
+        ctx->q_count--;
+        av_packet_free(&pkt);
+    }
+    pthread_mutex_unlock(&ctx->lock);
+
+    pthread_mutex_destroy(&ctx->lock);
+    pthread_cond_destroy(&ctx->cond_not_empty);
+    pthread_cond_destroy(&ctx->cond_not_full);
+    return 0;
+}
+
+const AVInputFormat ff_zstr_videotestsrc_demuxer = {
+    .name           = "zstr_videotestsrc",
+    .long_name      = "zff Video Test Pattern Generator",
+    .priv_data_size = sizeof(VideoTestSrcContext),
+    .read_header    = videotestsrc_read_header,
+    .read_packet    = videotestsrc_read_packet,
+    .read_close     = videotestsrc_read_close,
+    .flags          = AVFMT_NOFILE,
+    .priv_class     = &zstr_videotestsrc_class,
+};

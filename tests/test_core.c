@@ -94,7 +94,6 @@ int main(void) {
     printf("   Running zff-core Unit Tests\n");
     printf("========================================\n");
 
-    assert(zff_plugins_register_all() == 0);
     test_ptp_frame();
     test_ptp_packet();
     test_ptp_to_pts();

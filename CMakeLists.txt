@@ -55,6 +55,7 @@ target_link_libraries(zff-core
 
 # Plugins Library (libzff-plugins)
 set(PLUGINS_SOURCES
+    src/plugins/zff_plugins.c
     src/plugins/video/zstr_videotestsrc.c
     src/plugins/audio/zstr_audiotestsrc.c
 )
@@ -65,8 +66,10 @@ target_link_libraries(zff-plugins
     PUBLIC
     zff-core
     ${AVUTIL_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
     ${AVFILTER_LIBRARIES}
     m
+    pthread
 )
 
 # Testing

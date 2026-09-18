@@ -1,104 +1,110 @@
 /*=============================================================================
-    test_videotestsrc.c — Unit tests for zstr_videotestsrc
+    test_videotestsrc.c — Unit tests for zstr_videotestsrc (AVInputFormat)
 =============================================================================*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <time.h>
+#include "zff/zff_core.h"
 #include "zff/plugins/zstr_videotestsrc.h"
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
+#include <libavformat/avformat.h>
 
-static void test_patterns(void) {
-    printf("[TEST] Testing all video patterns...\n");
+static void test_videotestsrc_patterns(void) {
+    printf("[TEST] Testing zstr_videotestsrc patterns via standard av_read_frame()...\n");
 
     const char *patterns[] = { "bars", "gradient", "checkerboard", "noise", "black" };
     for (int i = 0; i < 5; i++) {
-        char opts[128];
-        snprintf(opts, sizeof(opts), "w=320:h=240:pattern=%s:num_frames=3", patterns[i]);
-        zstr_videotestsrc_t *src = zstr_videotestsrc_alloc(opts);
-        assert(src != NULL);
-        assert(src->width == 320);
-        assert(src->height == 240);
+        AVFormatContext *fmt_ctx = NULL;
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "video_size", "320x240", 0);
+        av_dict_set(&opts, "framerate", "30", 0);
+        av_dict_set(&opts, "pattern", patterns[i], 0);
+        av_dict_set(&opts, "realtime", "0", 0); /* burst mode for fast testing */
+        av_dict_set(&opts, "num_frames", "5", 0);
 
-        AVFrame *frame = av_frame_alloc();
-        assert(frame != NULL);
+        const AVInputFormat *iformat = zff_find_input_format("zstr_videotestsrc");
+        assert(iformat != NULL);
 
-        for (int f = 0; f < 3; f++) {
-            int ret = zstr_videotestsrc_read_frame(src, frame);
-            assert(ret == 0);
-            assert(frame->width == 320);
-            assert(frame->height == 240);
-            assert(frame->pts == f);
-            assert(frame->format == AV_PIX_FMT_YUV420P);
-            assert(frame->data[0] != NULL);
-            assert(frame->data[1] != NULL);
-            assert(frame->data[2] != NULL);
-            av_frame_unref(frame);
+        int ret = avformat_open_input(&fmt_ctx, "dummy", iformat, &opts);
+        assert(ret == 0);
+        assert(fmt_ctx != NULL);
+        assert(fmt_ctx->nb_streams == 1);
+        assert(fmt_ctx->streams[0]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
+        assert(fmt_ctx->streams[0]->codecpar->width == 320);
+        assert(fmt_ctx->streams[0]->codecpar->height == 240);
+
+        AVPacket *pkt = av_packet_alloc();
+        assert(pkt != NULL);
+
+        int frames_read = 0;
+        while (av_read_frame(fmt_ctx, pkt) >= 0) {
+            assert(pkt->size == 320 * 240 * 3 / 2);
+            assert(pkt->pts == frames_read);
+            frames_read++;
+            av_packet_unref(pkt);
         }
 
-        /* 4th read must return EOF */
-        int eof_ret = zstr_videotestsrc_read_frame(src, frame);
-        assert(eof_ret == AVERROR_EOF);
+        assert(frames_read == 5);
 
-        av_frame_free(&frame);
-        zstr_videotestsrc_free(&src);
-        assert(src == NULL);
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt_ctx);
+        av_dict_free(&opts);
     }
-    printf("[PASS] All video patterns passed.\n");
+    printf("[PASS] All zstr_videotestsrc patterns passed via standard av_read_frame().\n");
 }
 
-static void test_filtergraph_integration(void) {
-    printf("[TEST] Testing videotestsrc FilterGraph integration...\n");
+static void test_videotestsrc_timing(void) {
+    printf("[TEST] Testing zstr_videotestsrc real-time clock pacing...\n");
 
-    zstr_videotestsrc_t *src = zstr_videotestsrc_alloc("w=640:h=360:pattern=bars:rate=30");
-    assert(src != NULL);
+    AVFormatContext *fmt_ctx = NULL;
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "video_size", "640x360", 0);
+    av_dict_set(&opts, "framerate", "20", 0); /* 20 fps = 50ms per frame */
+    av_dict_set(&opts, "pattern", "bars", 0);
+    av_dict_set(&opts, "realtime", "1", 0);   /* Enforce real-time clock pacing */
+    av_dict_set(&opts, "num_frames", "4", 0);
 
-    AVFilterGraph *graph = avfilter_graph_alloc();
-    assert(graph != NULL);
+    const AVInputFormat *iformat = zff_find_input_format("zstr_videotestsrc");
+    assert(iformat != NULL);
 
-    AVFilterContext *src_ctx = NULL;
-    assert(zstr_videotestsrc_attach_to_graph(src, graph, &src_ctx) == 0);
-    assert(src_ctx != NULL);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    /* Create buffersink */
-    const AVFilter *buffersink = avfilter_get_by_name("buffersink");
-    assert(buffersink != NULL);
-    AVFilterContext *sink_ctx = NULL;
-    assert(avfilter_graph_create_filter(&sink_ctx, buffersink, "sink", NULL, NULL, graph) == 0);
+    int ret = avformat_open_input(&fmt_ctx, "dummy", iformat, &opts);
+    assert(ret == 0);
 
-    /* Link src -> sink */
-    assert(avfilter_link(src_ctx, 0, sink_ctx, 0) == 0);
-    assert(avfilter_graph_config(graph, NULL) == 0);
+    AVPacket *pkt = av_packet_alloc();
+    int frames = 0;
+    while (av_read_frame(fmt_ctx, pkt) >= 0) {
+        frames++;
+        av_packet_unref(pkt);
+    }
+    assert(frames == 4);
 
-    /* Generate frame and push into graph */
-    AVFrame *frame = av_frame_alloc();
-    assert(zstr_videotestsrc_read_frame(src, frame) == 0);
-    assert(av_buffersrc_add_frame(src_ctx, frame) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    printf("[INFO] 4 frames at 20fps elapsed: %.2f ms (expected >= 150 ms)\n", elapsed_ms);
+    assert(elapsed_ms >= 140.0);
 
-    /* Retrieve from sink */
-    AVFrame *out_frame = av_frame_alloc();
-    assert(av_buffersink_get_frame(sink_ctx, out_frame) == 0);
-    assert(out_frame->width == 640);
-    assert(out_frame->height == 360);
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt_ctx);
+    av_dict_free(&opts);
 
-    av_frame_free(&frame);
-    av_frame_free(&out_frame);
-    avfilter_graph_free(&graph);
-    zstr_videotestsrc_free(&src);
-
-    printf("[PASS] Video FilterGraph integration passed.\n");
+    printf("[PASS] zstr_videotestsrc real-time clock pacing passed.\n");
 }
 
 int main(void) {
-    printf("========================================\n");
-    printf("   Running zstr_videotestsrc Tests\n");
-    printf("========================================\n");
+    printf("====================================================\n");
+    printf("   Running zstr_videotestsrc (AVInputFormat) Tests  \n");
+    printf("====================================================\n");
 
-    test_patterns();
-    test_filtergraph_integration();
+    assert(zff_plugins_register_all() == 0);
 
-    printf("========================================\n");
-    printf("   All videotestsrc Tests Passed!\n");
-    printf("========================================\n");
+    test_videotestsrc_patterns();
+    test_videotestsrc_timing();
+
+    printf("====================================================\n");
+    printf("   All zstr_videotestsrc Tests Passed Successfully! \n");
+    printf("====================================================\n");
     return 0;
 }

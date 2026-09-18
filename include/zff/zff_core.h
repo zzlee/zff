@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <libavutil/frame.h>
 #include <libavcodec/packet.h>
+#include <libavformat/avformat.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,13 +19,25 @@ extern "C" {
 #define ZSTR_TAG_BBOX  ((enum AVFrameSideDataType)MKTAG('B', 'B', 'O', 'X'))
 #define ZSTR_TAG_USER  ((enum AVFrameSideDataType)MKTAG('Z', 'U', 'S', 'R'))
 
-/* ── Plugin Global Registration ─────────────────────────────────────────── */
+/* ── Global Discovery & Registration ─────────────────────────────────────── */
 
 /**
- * Register all zff native FFmpeg plugins (AVFilter, AVFormat, AVDevice).
- * Call this once during application initialization.
+ * Register all zff native FFmpeg plugins.
+ * Automatically called when libzff-plugins is loaded, or can be called explicitly.
  */
 int zff_plugins_register_all(void);
+
+/**
+ * Register a custom AVInputFormat into the zff registry.
+ */
+int zff_register_input_format(const AVInputFormat *fmt);
+
+/**
+ * Find an AVInputFormat by name.
+ * Searches zff registered input formats first (e.g. "zstr_videotestsrc", "zstr_audiotestsrc"),
+ * and falls back to standard FFmpeg av_find_input_format().
+ */
+const AVInputFormat* zff_find_input_format(const char *name);
 
 #ifdef __cplusplus
 }

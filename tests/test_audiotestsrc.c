@@ -1,101 +1,114 @@
 /*=============================================================================
-    test_audiotestsrc.c — Unit tests for zstr_audiotestsrc
+    test_audiotestsrc.c — Unit tests for zstr_audiotestsrc (AVInputFormat)
 =============================================================================*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <time.h>
+#include "zff/zff_core.h"
 #include "zff/plugins/zstr_audiotestsrc.h"
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
+#include <libavformat/avformat.h>
 
-static void test_waves(void) {
-    printf("[TEST] Testing all audio waveforms...\n");
+static void test_audiotestsrc_waves(void) {
+    printf("[TEST] Testing zstr_audiotestsrc waveforms via standard av_read_frame()...\n");
 
     const char *waves[] = { "sine", "square", "white_noise", "pink_noise", "silence" };
     for (int i = 0; i < 5; i++) {
-        char opts[128];
-        snprintf(opts, sizeof(opts), "r=44100:c=2:wave=%s:samples_per_frame=512:num_samples=1536", waves[i]);
-        zstr_audiotestsrc_t *src = zstr_audiotestsrc_alloc(opts);
-        assert(src != NULL);
-        assert(src->sample_rate == 44100);
-        assert(src->channels == 2);
+        AVFormatContext *fmt_ctx = NULL;
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "sample_rate", "44100", 0);
+        av_dict_set(&opts, "channels", "2", 0);
+        av_dict_set(&opts, "wave", waves[i], 0);
+        av_dict_set(&opts, "samples_per_frame", "512", 0);
+        av_dict_set(&opts, "realtime", "0", 0); /* burst mode */
+        av_dict_set(&opts, "num_samples", "1536", 0); /* exactly 3 packets of 512 */
 
-        AVFrame *frame = av_frame_alloc();
-        assert(frame != NULL);
+        const AVInputFormat *iformat = zff_find_input_format("zstr_audiotestsrc");
+        assert(iformat != NULL);
 
-        for (int f = 0; f < 3; f++) {
-            int ret = zstr_audiotestsrc_read_frame(src, frame);
-            assert(ret == 0);
-            assert(frame->nb_samples == 512);
-            assert(frame->sample_rate == 44100);
-            assert(frame->pts == f * 512);
-            assert(frame->data[0] != NULL);
-            av_frame_unref(frame);
+        int ret = avformat_open_input(&fmt_ctx, "dummy", iformat, &opts);
+        assert(ret == 0);
+        assert(fmt_ctx != NULL);
+        assert(fmt_ctx->nb_streams == 1);
+        assert(fmt_ctx->streams[0]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO);
+        assert(fmt_ctx->streams[0]->codecpar->sample_rate == 44100);
+        assert(fmt_ctx->streams[0]->codecpar->ch_layout.nb_channels == 2);
+
+        AVPacket *pkt = av_packet_alloc();
+        assert(pkt != NULL);
+
+        int packets_read = 0;
+        int64_t expected_pts = 0;
+        while (av_read_frame(fmt_ctx, pkt) >= 0) {
+            assert(pkt->size == 512 * 2 * sizeof(int16_t));
+            assert(pkt->pts == expected_pts);
+            expected_pts += 512;
+            packets_read++;
+            av_packet_unref(pkt);
         }
 
-        /* 4th read must return EOF because num_samples = 1536 (3 * 512) */
-        int eof_ret = zstr_audiotestsrc_read_frame(src, frame);
-        assert(eof_ret == AVERROR_EOF);
+        assert(packets_read == 3);
 
-        av_frame_free(&frame);
-        zstr_audiotestsrc_free(&src);
-        assert(src == NULL);
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt_ctx);
+        av_dict_free(&opts);
     }
-    printf("[PASS] All audio waveforms passed.\n");
+    printf("[PASS] All zstr_audiotestsrc waveforms passed via standard av_read_frame().\n");
 }
 
-static void test_filtergraph_integration(void) {
-    printf("[TEST] Testing audiotestsrc FilterGraph integration...\n");
+static void test_audiotestsrc_cadence(void) {
+    printf("[TEST] Testing zstr_audiotestsrc real-time audio cadence pacing...\n");
 
-    zstr_audiotestsrc_t *src = zstr_audiotestsrc_alloc("r=48000:c=2:wave=sine:f=1000:samples_per_frame=1024");
-    assert(src != NULL);
+    AVFormatContext *fmt_ctx = NULL;
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "sample_rate", "48000", 0);
+    av_dict_set(&opts, "channels", "2", 0);
+    av_dict_set(&opts, "wave", "sine", 0);
+    av_dict_set(&opts, "samples_per_frame", "1024", 0); /* 1024 / 48000 = ~21.33 ms per frame */
+    av_dict_set(&opts, "realtime", "1", 0);            /* Real-time audio pacing */
+    av_dict_set(&opts, "num_samples", "4096", 0);       /* 4 buffers = ~85.3 ms */
 
-    AVFilterGraph *graph = avfilter_graph_alloc();
-    assert(graph != NULL);
+    const AVInputFormat *iformat = zff_find_input_format("zstr_audiotestsrc");
+    assert(iformat != NULL);
 
-    AVFilterContext *src_ctx = NULL;
-    assert(zstr_audiotestsrc_attach_to_graph(src, graph, &src_ctx) == 0);
-    assert(src_ctx != NULL);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    /* Create abuffersink */
-    const AVFilter *abuffersink = avfilter_get_by_name("abuffersink");
-    assert(abuffersink != NULL);
-    AVFilterContext *sink_ctx = NULL;
-    assert(avfilter_graph_create_filter(&sink_ctx, abuffersink, "sink", NULL, NULL, graph) == 0);
+    int ret = avformat_open_input(&fmt_ctx, "dummy", iformat, &opts);
+    assert(ret == 0);
 
-    /* Link src -> sink */
-    assert(avfilter_link(src_ctx, 0, sink_ctx, 0) == 0);
-    assert(avfilter_graph_config(graph, NULL) == 0);
+    AVPacket *pkt = av_packet_alloc();
+    int packets = 0;
+    while (av_read_frame(fmt_ctx, pkt) >= 0) {
+        packets++;
+        av_packet_unref(pkt);
+    }
+    assert(packets == 4);
 
-    /* Generate frame and push into graph */
-    AVFrame *frame = av_frame_alloc();
-    assert(zstr_audiotestsrc_read_frame(src, frame) == 0);
-    assert(av_buffersrc_add_frame(src_ctx, frame) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    printf("[INFO] 4 audio packets (4096 samples at 48kHz) elapsed: %.2f ms (expected >= 60 ms)\n", elapsed_ms);
+    assert(elapsed_ms >= 55.0);
 
-    /* Retrieve from sink */
-    AVFrame *out_frame = av_frame_alloc();
-    assert(av_buffersink_get_frame(sink_ctx, out_frame) == 0);
-    assert(out_frame->nb_samples == 1024);
-    assert(out_frame->sample_rate == 48000);
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt_ctx);
+    av_dict_free(&opts);
 
-    av_frame_free(&frame);
-    av_frame_free(&out_frame);
-    avfilter_graph_free(&graph);
-    zstr_audiotestsrc_free(&src);
-
-    printf("[PASS] Audio FilterGraph integration passed.\n");
+    printf("[PASS] zstr_audiotestsrc real-time audio cadence pacing passed.\n");
 }
 
 int main(void) {
-    printf("========================================\n");
-    printf("   Running zstr_audiotestsrc Tests\n");
-    printf("========================================\n");
+    printf("====================================================\n");
+    printf("   Running zstr_audiotestsrc (AVInputFormat) Tests  \n");
+    printf("====================================================\n");
 
-    test_waves();
-    test_filtergraph_integration();
+    assert(zff_plugins_register_all() == 0);
 
-    printf("========================================\n");
-    printf("   All audiotestsrc Tests Passed!\n");
-    printf("========================================\n");
+    test_audiotestsrc_waves();
+    test_audiotestsrc_cadence();
+
+    printf("====================================================\n");
+    printf("   All zstr_audiotestsrc Tests Passed Successfully! \n");
+    printf("====================================================\n");
     return 0;
 }

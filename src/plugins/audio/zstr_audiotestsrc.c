@@ -1,36 +1,74 @@
 /*=============================================================================
-    zstr_audiotestsrc.c — Synthetic Audio Test Signal Generator for FFmpeg
+    zstr_audiotestsrc.c — Audio Test Source Input Device (AVInputFormat)
 =============================================================================*/
 #include "zff/plugins/zstr_audiotestsrc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <libavutil/mem.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 #include <libavutil/opt.h>
-#include <libavfilter/buffersrc.h>
+#include <libavformat/avformat.h>
 
-#define OFFSET(x) offsetof(zstr_audiotestsrc_t, x)
-#define FLAGS AV_OPT_FLAG_AUDIO_PARAM | AV_OPT_FLAG_FILTERING_PARAM
+#define QUEUE_CAPACITY 32
+
+typedef enum {
+    WAVE_SINE = 0,
+    WAVE_SQUARE,
+    WAVE_WHITE_NOISE,
+    WAVE_PINK_NOISE,
+    WAVE_SILENCE
+} AudioWave;
+
+typedef struct AudioTestSrcContext {
+    const AVClass *av_class;
+
+    int sample_rate;
+    int channels;
+    int wave;
+    double frequency;
+    double volume;
+    int samples_per_frame;
+    int realtime;
+    int64_t num_samples;
+
+    /* Background worker thread & packet queue */
+    pthread_t worker_thread;
+    pthread_mutex_t lock;
+    pthread_cond_t cond_not_empty;
+    pthread_cond_t cond_not_full;
+    int thread_started;
+    int stop_requested;
+    int eof_reached;
+
+    AVPacket *queue[QUEUE_CAPACITY];
+    int q_head;
+    int q_tail;
+    int q_count;
+
+    double phase;
+    double pink_b0, pink_b1, pink_b2, pink_b3, pink_b4, pink_b5, pink_b6;
+} AudioTestSrcContext;
+
+#define OFFSET(x) offsetof(AudioTestSrcContext, x)
+#define DEC AV_OPT_FLAG_DECODING_PARAM
 
 static const AVOption zstr_audiotestsrc_options[] = {
-    { "sample_rate",       "Sample rate",             OFFSET(sample_rate),       AV_OPT_TYPE_INT,        { .i64 = 48000 }, 8000, 192000, FLAGS },
-    { "r",                 "Sample rate",             OFFSET(sample_rate),       AV_OPT_TYPE_INT,        { .i64 = 48000 }, 8000, 192000, FLAGS },
-    { "channels",          "Number of channels",      OFFSET(channels),          AV_OPT_TYPE_INT,        { .i64 = 2 }, 1, 8, FLAGS },
-    { "c",                 "Number of channels",      OFFSET(channels),          AV_OPT_TYPE_INT,        { .i64 = 2 }, 1, 8, FLAGS },
-    { "sample_fmt",        "Sample format",           OFFSET(sample_fmt),        AV_OPT_TYPE_SAMPLE_FMT, { .i64 = AV_SAMPLE_FMT_S16 }, 0, INT_MAX, FLAGS },
-    { "wave",              "Waveform type",           OFFSET(wave),              AV_OPT_TYPE_INT,        { .i64 = ZSTR_AUDIO_WAVE_SINE }, 0, 4, FLAGS, "wave" },
-        { "sine",          "Sine wave",         0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_AUDIO_WAVE_SINE },        0, 0, FLAGS, "wave" },
-        { "square",        "Square wave",       0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_AUDIO_WAVE_SQUARE },      0, 0, FLAGS, "wave" },
-        { "white_noise",   "White noise",       0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_AUDIO_WAVE_WHITE_NOISE }, 0, 0, FLAGS, "wave" },
-        { "pink_noise",    "Pink noise",        0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_AUDIO_WAVE_PINK_NOISE },  0, 0, FLAGS, "wave" },
-        { "silence",       "Silence",           0, AV_OPT_TYPE_CONST, { .i64 = ZSTR_AUDIO_WAVE_SILENCE },     0, 0, FLAGS, "wave" },
-    { "freq",              "Tone frequency (Hz)",     OFFSET(frequency),         AV_OPT_TYPE_DOUBLE,     { .dbl = 1000.0 }, 20.0, 20000.0, FLAGS },
-    { "f",                 "Tone frequency (Hz)",     OFFSET(frequency),         AV_OPT_TYPE_DOUBLE,     { .dbl = 1000.0 }, 20.0, 20000.0, FLAGS },
-    { "volume",            "Volume level (0.0-1.0)",  OFFSET(volume),            AV_OPT_TYPE_DOUBLE,     { .dbl = 0.5 }, 0.0, 1.0, FLAGS },
-    { "v",                 "Volume level (0.0-1.0)",  OFFSET(volume),            AV_OPT_TYPE_DOUBLE,     { .dbl = 0.5 }, 0.0, 1.0, FLAGS },
-    { "samples_per_frame", "Samples per buffer",      OFFSET(samples_per_frame), AV_OPT_TYPE_INT,        { .i64 = 1024 }, 64, 8192, FLAGS },
-    { "num_samples",       "Max samples to output",   OFFSET(num_samples),       AV_OPT_TYPE_INT64,      { .i64 = 0 }, 0, INT64_MAX, FLAGS },
+    { "sample_rate",       "Sample rate in Hz",          OFFSET(sample_rate),       AV_OPT_TYPE_INT,    { .i64 = 48000 }, 8000, 192000, DEC },
+    { "channels",          "Number of audio channels",   OFFSET(channels),          AV_OPT_TYPE_INT,    { .i64 = 2 },     1, 8, DEC },
+    { "wave",              "Waveform type",              OFFSET(wave),              AV_OPT_TYPE_INT,    { .i64 = WAVE_SINE }, 0, 4, DEC, "wave" },
+        { "sine",          "Sine wave",         0, AV_OPT_TYPE_CONST, { .i64 = WAVE_SINE },        0, 0, DEC, "wave" },
+        { "square",        "Square wave",       0, AV_OPT_TYPE_CONST, { .i64 = WAVE_SQUARE },      0, 0, DEC, "wave" },
+        { "white_noise",   "White noise",       0, AV_OPT_TYPE_CONST, { .i64 = WAVE_WHITE_NOISE }, 0, 0, DEC, "wave" },
+        { "pink_noise",    "Pink noise",        0, AV_OPT_TYPE_CONST, { .i64 = WAVE_PINK_NOISE },  0, 0, DEC, "wave" },
+        { "silence",       "Silence",           0, AV_OPT_TYPE_CONST, { .i64 = WAVE_SILENCE },     0, 0, DEC, "wave" },
+    { "freq",              "Tone frequency (Hz)",        OFFSET(frequency),         AV_OPT_TYPE_DOUBLE, { .dbl = 1000.0 }, 20.0, 20000.0, DEC },
+    { "volume",            "Volume level (0.0-1.0)",     OFFSET(volume),            AV_OPT_TYPE_DOUBLE, { .dbl = 0.5 },    0.0, 1.0, DEC },
+    { "samples_per_frame", "Samples per buffer packet",  OFFSET(samples_per_frame), AV_OPT_TYPE_INT,    { .i64 = 1024 },  64, 8192, DEC },
+    { "realtime",          "Real-time audio pacing",     OFFSET(realtime),          AV_OPT_TYPE_BOOL,   { .i64 = 1 },     0, 1, DEC },
+    { "num_samples",       "Max samples (0=infinite)",   OFFSET(num_samples),       AV_OPT_TYPE_INT64,  { .i64 = 0 },     0, INT64_MAX, DEC },
     { NULL }
 };
 
@@ -41,148 +79,212 @@ static const AVClass zstr_audiotestsrc_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-static double generate_sample(zstr_audiotestsrc_t *s) {
+static double generate_sample(AudioTestSrcContext *ctx) {
     double val = 0.0;
-    switch (s->wave) {
-        case ZSTR_AUDIO_WAVE_SINE:
-            val = sin(2.0 * M_PI * s->phase);
-            s->phase += s->frequency / (double)s->sample_rate;
-            if (s->phase >= 1.0) s->phase -= 1.0;
+    switch (ctx->wave) {
+        case WAVE_SINE:
+            val = sin(2.0 * M_PI * ctx->phase);
+            ctx->phase += ctx->frequency / (double)ctx->sample_rate;
+            if (ctx->phase >= 1.0) ctx->phase -= 1.0;
             break;
-        case ZSTR_AUDIO_WAVE_SQUARE:
-            val = (s->phase < 0.5) ? 1.0 : -1.0;
-            s->phase += s->frequency / (double)s->sample_rate;
-            if (s->phase >= 1.0) s->phase -= 1.0;
+        case WAVE_SQUARE:
+            val = (ctx->phase < 0.5) ? 1.0 : -1.0;
+            ctx->phase += ctx->frequency / (double)ctx->sample_rate;
+            if (ctx->phase >= 1.0) ctx->phase -= 1.0;
             break;
-        case ZSTR_AUDIO_WAVE_WHITE_NOISE:
+        case WAVE_WHITE_NOISE:
             val = ((double)rand() / (double)RAND_MAX) * 2.0 - 1.0;
             break;
-        case ZSTR_AUDIO_WAVE_PINK_NOISE: {
+        case WAVE_PINK_NOISE: {
             double white = ((double)rand() / (double)RAND_MAX) * 2.0 - 1.0;
-            s->pink_b0 = 0.99886 * s->pink_b0 + white * 0.0555179;
-            s->pink_b1 = 0.99332 * s->pink_b1 + white * 0.0750759;
-            s->pink_b2 = 0.96900 * s->pink_b2 + white * 0.1538520;
-            s->pink_b3 = 0.86650 * s->pink_b3 + white * 0.3104856;
-            s->pink_b4 = 0.55000 * s->pink_b4 + white * 0.5329522;
-            s->pink_b5 = -0.7616 * s->pink_b5 - white * 0.0168980;
-            val = (s->pink_b0 + s->pink_b1 + s->pink_b2 + s->pink_b3 +
-                   s->pink_b4 + s->pink_b5 + s->pink_b6 + white * 0.5362) * 0.11;
-            s->pink_b6 = white * 0.115926;
+            ctx->pink_b0 = 0.99886 * ctx->pink_b0 + white * 0.0555179;
+            ctx->pink_b1 = 0.99332 * ctx->pink_b1 + white * 0.0750759;
+            ctx->pink_b2 = 0.96900 * ctx->pink_b2 + white * 0.1538520;
+            ctx->pink_b3 = 0.86650 * ctx->pink_b3 + white * 0.3104856;
+            ctx->pink_b4 = 0.55000 * ctx->pink_b4 + white * 0.5329522;
+            ctx->pink_b5 = -0.7616 * ctx->pink_b5 - white * 0.0168980;
+            val = (ctx->pink_b0 + ctx->pink_b1 + ctx->pink_b2 + ctx->pink_b3 +
+                   ctx->pink_b4 + ctx->pink_b5 + ctx->pink_b6 + white * 0.5362) * 0.11;
+            ctx->pink_b6 = white * 0.115926;
             break;
         }
-        case ZSTR_AUDIO_WAVE_SILENCE:
+        case WAVE_SILENCE:
         default:
             val = 0.0;
             break;
     }
-    return val * s->volume;
+    return val * ctx->volume;
 }
 
-zstr_audiotestsrc_t* zstr_audiotestsrc_alloc(const char *opt_string) {
-    zstr_audiotestsrc_t *s = av_mallocz(sizeof(zstr_audiotestsrc_t));
-    if (!s) return NULL;
+static void* audiotestsrc_worker(void *arg) {
+    AudioTestSrcContext *ctx = (AudioTestSrcContext*)arg;
+    int64_t total_sent = 0;
 
-    s->av_class = &zstr_audiotestsrc_class;
-    av_opt_set_defaults(s);
+    int64_t interval_ns = (1000000000LL * ctx->samples_per_frame) / ctx->sample_rate;
+    struct timespec next_time;
+    clock_gettime(CLOCK_MONOTONIC, &next_time);
 
-    if (opt_string && *opt_string) {
-        if (av_set_options_string(s, opt_string, "=", ":") < 0) {
-            zstr_audiotestsrc_free(&s);
-            return NULL;
+    while (1) {
+        pthread_mutex_lock(&ctx->lock);
+        if (ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            break;
         }
-    }
+        if (ctx->num_samples > 0 && total_sent >= ctx->num_samples) {
+            ctx->eof_reached = 1;
+            pthread_cond_broadcast(&ctx->cond_not_empty);
+            pthread_mutex_unlock(&ctx->lock);
+            break;
+        }
 
-    av_channel_layout_default(&s->ch_layout, s->channels);
-    return s;
-}
+        while (ctx->q_count == QUEUE_CAPACITY && !ctx->stop_requested) {
+            pthread_cond_wait(&ctx->cond_not_full, &ctx->lock);
+        }
+        if (ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            break;
+        }
+        pthread_mutex_unlock(&ctx->lock);
 
-int zstr_audiotestsrc_read_frame(zstr_audiotestsrc_t *s, AVFrame *frame) {
-    if (!s || !frame) return AVERROR(EINVAL);
+        /* Real-time audio pacing */
+        if (ctx->realtime) {
+            next_time.tv_nsec += interval_ns;
+            while (next_time.tv_nsec >= 1000000000L) {
+                next_time.tv_sec += 1;
+                next_time.tv_nsec -= 1000000000L;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
+        }
 
-    if (s->num_samples > 0 && s->total_samples_sent >= s->num_samples) {
-        return AVERROR_EOF;
-    }
+        int nb_samples = ctx->samples_per_frame;
+        if (ctx->num_samples > 0 && total_sent + nb_samples > ctx->num_samples) {
+            nb_samples = (int)(ctx->num_samples - total_sent);
+        }
 
-    int nb_samples = s->samples_per_frame;
-    if (s->num_samples > 0 && s->total_samples_sent + nb_samples > s->num_samples) {
-        nb_samples = (int)(s->num_samples - s->total_samples_sent);
-    }
+        int bytes_per_sample = 2 * ctx->channels; // S16LE interleaved
+        int pkt_size = nb_samples * bytes_per_sample;
 
-    frame->nb_samples = nb_samples;
-    frame->format = s->sample_fmt;
-    frame->sample_rate = s->sample_rate;
-    av_channel_layout_copy(&frame->ch_layout, &s->ch_layout);
-    frame->pts = s->total_samples_sent;
+        AVPacket *pkt = av_packet_alloc();
+        if (!pkt) break;
+        if (av_new_packet(pkt, pkt_size) < 0) {
+            av_packet_free(&pkt);
+            break;
+        }
 
-    int ret = av_frame_get_buffer(frame, 0);
-    if (ret < 0) return ret;
-
-    ret = av_frame_make_writable(frame);
-    if (ret < 0) return ret;
-
-    int is_planar = av_sample_fmt_is_planar(s->sample_fmt);
-
-    for (int i = 0; i < nb_samples; i++) {
-        double sample_val = generate_sample(s);
-
-        for (int ch = 0; ch < s->channels; ch++) {
-            if (s->sample_fmt == AV_SAMPLE_FMT_S16 || s->sample_fmt == AV_SAMPLE_FMT_S16P) {
-                int16_t v16 = (int16_t)round(sample_val * 32767.0);
-                if (is_planar) {
-                    ((int16_t*)frame->data[ch])[i] = v16;
-                } else {
-                    ((int16_t*)frame->data[0])[i * s->channels + ch] = v16;
-                }
-            } else if (s->sample_fmt == AV_SAMPLE_FMT_S32 || s->sample_fmt == AV_SAMPLE_FMT_S32P) {
-                int32_t v32 = (int32_t)round(sample_val * 2147483647.0);
-                if (is_planar) {
-                    ((int32_t*)frame->data[ch])[i] = v32;
-                } else {
-                    ((int32_t*)frame->data[0])[i * s->channels + ch] = v32;
-                }
-            } else if (s->sample_fmt == AV_SAMPLE_FMT_FLT || s->sample_fmt == AV_SAMPLE_FMT_FLTP) {
-                float vf = (float)sample_val;
-                if (is_planar) {
-                    ((float*)frame->data[ch])[i] = vf;
-                } else {
-                    ((float*)frame->data[0])[i * s->channels + ch] = vf;
-                }
+        int16_t *pcm = (int16_t*)pkt->data;
+        for (int i = 0; i < nb_samples; i++) {
+            double sample = generate_sample(ctx);
+            int16_t v = (int16_t)round(sample * 32767.0);
+            for (int ch = 0; ch < ctx->channels; ch++) {
+                pcm[i * ctx->channels + ch] = v;
             }
         }
-    }
 
-    s->total_samples_sent += nb_samples;
-    s->frame_count++;
+        pkt->pts = total_sent;
+        pkt->dts = total_sent;
+        pkt->duration = nb_samples;
+        pkt->stream_index = 0;
+        total_sent += nb_samples;
+
+        pthread_mutex_lock(&ctx->lock);
+        ctx->queue[ctx->q_tail] = pkt;
+        ctx->q_tail = (ctx->q_tail + 1) % QUEUE_CAPACITY;
+        ctx->q_count++;
+        pthread_cond_signal(&ctx->cond_not_empty);
+        pthread_mutex_unlock(&ctx->lock);
+    }
+    return NULL;
+}
+
+static int audiotestsrc_read_header(AVFormatContext *s) {
+    AudioTestSrcContext *ctx = s->priv_data;
+
+    AVStream *st = avformat_new_stream(s, NULL);
+    if (!st) return AVERROR(ENOMEM);
+
+    st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    st->codecpar->codec_id   = AV_CODEC_ID_PCM_S16LE;
+    st->codecpar->sample_rate = ctx->sample_rate;
+    av_channel_layout_default(&st->codecpar->ch_layout, ctx->channels);
+    st->time_base            = (AVRational){ 1, ctx->sample_rate };
+
+    pthread_mutex_init(&ctx->lock, NULL);
+    pthread_cond_init(&ctx->cond_not_empty, NULL);
+    pthread_cond_init(&ctx->cond_not_full, NULL);
+
+    ctx->q_head = 0;
+    ctx->q_tail = 0;
+    ctx->q_count = 0;
+    ctx->stop_requested = 0;
+    ctx->eof_reached = 0;
+
+    if (pthread_create(&ctx->worker_thread, NULL, audiotestsrc_worker, ctx) != 0) {
+        return AVERROR(EIO);
+    }
+    ctx->thread_started = 1;
     return 0;
 }
 
-int zstr_audiotestsrc_attach_to_graph(zstr_audiotestsrc_t *s,
-                                      AVFilterGraph *graph,
-                                      AVFilterContext **out_src_ctx) {
-    if (!s || !graph || !out_src_ctx) return AVERROR(EINVAL);
+static int audiotestsrc_read_packet(AVFormatContext *s, AVPacket *pkt) {
+    AudioTestSrcContext *ctx = s->priv_data;
 
-    const AVFilter *abuffer = avfilter_get_by_name("abuffer");
-    if (!abuffer) return AVERROR_FILTER_NOT_FOUND;
-
-    char ch_layout_str[128] = {0};
-    av_channel_layout_describe(&s->ch_layout, ch_layout_str, sizeof(ch_layout_str));
-
-    char args[512];
-    snprintf(args, sizeof(args),
-             "time_base=1/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%s",
-             s->sample_rate, s->sample_rate,
-             av_get_sample_fmt_name(s->sample_fmt),
-             ch_layout_str);
-
-    int ret = avfilter_graph_create_filter(out_src_ctx, abuffer,
-                                          "zstr_audiotestsrc", args, NULL, graph);
-    return ret;
-}
-
-void zstr_audiotestsrc_free(zstr_audiotestsrc_t **s) {
-    if (s && *s) {
-        av_opt_free(*s);
-        av_channel_layout_uninit(&(*s)->ch_layout);
-        av_freep(s);
+    pthread_mutex_lock(&ctx->lock);
+    while (ctx->q_count == 0) {
+        if (ctx->eof_reached || ctx->stop_requested) {
+            pthread_mutex_unlock(&ctx->lock);
+            return AVERROR_EOF;
+        }
+        pthread_cond_wait(&ctx->cond_not_empty, &ctx->lock);
     }
+
+    AVPacket *queued = ctx->queue[ctx->q_head];
+    ctx->queue[ctx->q_head] = NULL;
+    ctx->q_head = (ctx->q_head + 1) % QUEUE_CAPACITY;
+    ctx->q_count--;
+
+    pthread_cond_signal(&ctx->cond_not_full);
+    pthread_mutex_unlock(&ctx->lock);
+
+    av_packet_move_ref(pkt, queued);
+    av_packet_free(&queued);
+    return 0;
 }
+
+static int audiotestsrc_read_close(AVFormatContext *s) {
+    AudioTestSrcContext *ctx = s->priv_data;
+    if (ctx->thread_started) {
+        pthread_mutex_lock(&ctx->lock);
+        ctx->stop_requested = 1;
+        pthread_cond_broadcast(&ctx->cond_not_empty);
+        pthread_cond_broadcast(&ctx->cond_not_full);
+        pthread_mutex_unlock(&ctx->lock);
+
+        pthread_join(ctx->worker_thread, NULL);
+        ctx->thread_started = 0;
+    }
+
+    pthread_mutex_lock(&ctx->lock);
+    while (ctx->q_count > 0) {
+        AVPacket *pkt = ctx->queue[ctx->q_head];
+        ctx->q_head = (ctx->q_head + 1) % QUEUE_CAPACITY;
+        ctx->q_count--;
+        av_packet_free(&pkt);
+    }
+    pthread_mutex_unlock(&ctx->lock);
+
+    pthread_mutex_destroy(&ctx->lock);
+    pthread_cond_destroy(&ctx->cond_not_empty);
+    pthread_cond_destroy(&ctx->cond_not_full);
+    return 0;
+}
+
+const AVInputFormat ff_zstr_audiotestsrc_demuxer = {
+    .name           = "zstr_audiotestsrc",
+    .long_name      = "zff Audio Test Signal Generator",
+    .priv_data_size = sizeof(AudioTestSrcContext),
+    .read_header    = audiotestsrc_read_header,
+    .read_packet    = audiotestsrc_read_packet,
+    .read_close     = audiotestsrc_read_close,
+    .flags          = AVFMT_NOFILE,
+    .priv_class     = &zstr_audiotestsrc_class,
+};

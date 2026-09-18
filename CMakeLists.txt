@@ -24,6 +24,8 @@ pkg_check_modules(AVDEVICE REQUIRED libavdevice)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(ALSA REQUIRED alsa)
+pkg_check_modules(GL REQUIRED gl)
+pkg_check_modules(X11 REQUIRED x11)
 
 # Include directories
 include_directories(
@@ -36,6 +38,8 @@ include_directories(
     ${SWSCALE_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${ALSA_INCLUDE_DIRS}
+    ${GL_INCLUDE_DIRS}
+    ${X11_INCLUDE_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -66,6 +70,8 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_alsa.c
     src/plugins/devices/zstr_v4l2_sink.c
     src/plugins/devices/zstr_alsa_sink.c
+    src/plugins/audio/zstr_amix.c
+    src/plugins/video/zstr_glsink.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -79,6 +85,8 @@ target_link_libraries(zff-plugins
     ${SWRESAMPLE_LIBRARIES}
     ${SWSCALE_LIBRARIES}
     ${ALSA_LIBRARIES}
+    ${GL_LIBRARIES}
+    ${X11_LIBRARIES}
     m
     pthread
 )
@@ -122,6 +130,14 @@ if(BUILD_TESTS)
     add_executable(test_alsa_sink tests/test_alsa_sink.c)
     target_link_libraries(test_alsa_sink PRIVATE zff-plugins zff-core m)
     add_test(NAME test_alsa_sink COMMAND test_alsa_sink)
+
+    add_executable(test_amix tests/test_amix.c)
+    target_link_libraries(test_amix PRIVATE zff-plugins zff-core ${SWRESAMPLE_LIBRARIES} m)
+    add_test(NAME test_amix COMMAND test_amix)
+
+    add_executable(test_glsink tests/test_glsink.c)
+    target_link_libraries(test_glsink PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES})
+    add_test(NAME test_glsink COMMAND test_glsink)
 endif()
 
 message(STATUS "zff configured successfully.")

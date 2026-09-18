@@ -76,6 +76,10 @@ set(PLUGINS_SOURCES
     src/plugins/video/zstr_glsink.c
     src/plugins/video/zstr_text_overlay.c
     src/plugins/video/zstr_gl_comp.c
+    src/plugins/streaming/zstr_net_source.c
+    src/plugins/streaming/zstr_net_sink.c
+    src/plugins/streaming/zstr_rtp_payloader.c
+    src/plugins/streaming/zstr_rtp_depayloader.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -151,6 +155,14 @@ if(BUILD_TESTS)
     add_executable(test_gl_comp tests/test_gl_comp.c)
     target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)
     add_test(NAME test_gl_comp COMMAND test_gl_comp)
+
+    add_executable(test_net tests/test_net.c)
+    target_link_libraries(test_net PRIVATE zff-plugins zff-core pthread)
+    add_test(NAME test_net COMMAND test_net)
+
+    add_executable(test_rtp tests/test_rtp.c)
+    target_link_libraries(test_rtp PRIVATE zff-plugins zff-core)
+    add_test(NAME test_rtp COMMAND test_rtp)
 endif()
 
 message(STATUS "zff configured successfully.")

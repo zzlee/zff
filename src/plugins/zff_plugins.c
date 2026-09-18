@@ -10,16 +10,19 @@
 #include "zff/plugins/zstr_alsa_sink.h"
 #include "zff/plugins/zstr_glsink.h"
 #include "zff/plugins/zstr_gl_comp.h"
+#include "zff/plugins/zstr_net.h"
 
 int zff_plugins_register_all(void) {
     zff_register_input_format(&ff_zstr_videotestsrc_demuxer);
     zff_register_input_format(&ff_zstr_audiotestsrc_demuxer);
     zff_register_input_format(&ff_zstr_v4l2_demuxer);
     zff_register_input_format(&ff_zstr_alsa_demuxer);
+    zff_register_input_format(&ff_zstr_net_source_demuxer);
     zff_register_output_format(&ff_zstr_v4l2_sink_muxer.p);
     zff_register_output_format(&ff_zstr_alsa_sink_muxer.p);
     zff_register_output_format(&ff_zstr_glsink_muxer.p);
     zff_register_output_format(&ff_zstr_gl_comp_muxer.p);
+    zff_register_output_format(&ff_zstr_net_sink_muxer.p);
     return 0;
 }
 

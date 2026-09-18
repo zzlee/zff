@@ -235,15 +235,15 @@ typedef struct SrtDemuxContext {
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 
 static const AVOption zstr_srt_demux_options[] = {
-    { "host",         "Host or IP address", OFFSET(host),         AV_OPT_TYPE_STRING, { .str = "127.0.0.1" }, 0, 0, DEC },
-    { "port",         "Port number",        OFFSET(port),         AV_OPT_TYPE_INT,    { .i64 = 9000 },        0, 65535, DEC },
-    { "mode",         "Connection mode",    OFFSET(mode_str),     AV_OPT_TYPE_STRING, { .str = "caller" },   0, 0, DEC },
-    { "latency",      "Latency in ms",      OFFSET(latency),      AV_OPT_TYPE_INT,    { .i64 = 120 },         0, 10000, DEC },
-    { "passphrase",   "AES Passphrase",     OFFSET(passphrase),   AV_OPT_TYPE_STRING, { .str = NULL },        0, 0, DEC },
-    { "pbkeylen",     "Key length in bytes",OFFSET(pbkeylen),     AV_OPT_TYPE_INT,    { .i64 = 16 },          16, 32, DEC },
-    { "streamid",     "Stream ID",          OFFSET(streamid),     AV_OPT_TYPE_STRING, { .str = NULL },        0, 0, DEC },
-    { "payload_size", "Payload size",       OFFSET(payload_size), AV_OPT_TYPE_INT,    { .i64 = 1316 },        0, 65536, DEC },
-    { "timeout",      "Timeout in ms",      OFFSET(timeout_ms),   AV_OPT_TYPE_INT,    { .i64 = 3000 },        0, 60000, DEC },
+    { "host",         "Host or IP address", OFFSET(host),         AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
+    { "port",         "Port number",        OFFSET(port),         AV_OPT_TYPE_INT,    { .i64 = 0 },    0, 65535, DEC },
+    { "mode",         "Connection mode",    OFFSET(mode_str),     AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
+    { "latency",      "Latency in ms",      OFFSET(latency),      AV_OPT_TYPE_INT,    { .i64 = 0 },    0, 10000, DEC },
+    { "passphrase",   "AES Passphrase",     OFFSET(passphrase),   AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
+    { "pbkeylen",     "Key length in bytes",OFFSET(pbkeylen),     AV_OPT_TYPE_INT,    { .i64 = 0 },    0, 32, DEC },
+    { "streamid",     "Stream ID",          OFFSET(streamid),     AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
+    { "payload_size", "Payload size",       OFFSET(payload_size), AV_OPT_TYPE_INT,    { .i64 = 0 },    0, 65536, DEC },
+    { "timeout",      "Timeout in ms",      OFFSET(timeout_ms),   AV_OPT_TYPE_INT,    { .i64 = 0 },    0, 60000, DEC },
     { NULL }
 };
 
@@ -269,20 +269,27 @@ static int srt_read_header(AVFormatContext *s)
     } else {
         memset(&cfg, 0, sizeof(cfg));
         cfg.mode = ZSTR_SRT_MODE_CALLER;
-        cfg.host = ctx->host ? ctx->host : "127.0.0.1";
-        cfg.port = (uint16_t)(ctx->port ? ctx->port : 9000);
-        cfg.latency_ms = ctx->latency ? ctx->latency : 120;
-        cfg.passphrase = ctx->passphrase;
-        cfg.pbkeylen = ctx->pbkeylen ? ctx->pbkeylen : 16;
-        cfg.streamid = ctx->streamid;
-        cfg.payload_size = ctx->payload_size ? ctx->payload_size : 1316;
-        cfg.timeout_ms = ctx->timeout_ms ? ctx->timeout_ms : 3000;
+        cfg.host = "127.0.0.1";
+        cfg.port = 9000;
+        cfg.latency_ms = 120;
+        cfg.payload_size = 1316;
+        cfg.timeout_ms = 3000;
+        cfg.pbkeylen = 16;
     }
 
-    if (ctx->mode_str) {
+    if (ctx->host && ctx->host[0]) cfg.host = ctx->host;
+    if (ctx->port > 0) cfg.port = (uint16_t)ctx->port;
+    if (ctx->latency > 0) cfg.latency_ms = ctx->latency;
+    if (ctx->passphrase && ctx->passphrase[0]) cfg.passphrase = ctx->passphrase;
+    if (ctx->pbkeylen > 0) cfg.pbkeylen = ctx->pbkeylen;
+    if (ctx->streamid && ctx->streamid[0]) cfg.streamid = ctx->streamid;
+    if (ctx->payload_size > 0) cfg.payload_size = ctx->payload_size;
+    if (ctx->timeout_ms > 0) cfg.timeout_ms = ctx->timeout_ms;
+
+    if (ctx->mode_str && ctx->mode_str[0]) {
         if (strcmp(ctx->mode_str, "listener") == 0) cfg.mode = ZSTR_SRT_MODE_LISTENER;
         else if (strcmp(ctx->mode_str, "rendezvous") == 0) cfg.mode = ZSTR_SRT_MODE_RENDEZVOUS;
-        else cfg.mode = ZSTR_SRT_MODE_CALLER;
+        else if (strcmp(ctx->mode_str, "caller") == 0) cfg.mode = ZSTR_SRT_MODE_CALLER;
     }
 
     ctx->src = zstr_srt_source_create(&cfg);

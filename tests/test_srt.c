@@ -1,7 +1,8 @@
 /*=============================================================================
-    test_srt.c — Comprehensive Unit Tests for SRT Subtitle Parser & Streaming
+    test_srt.c — Comprehensive Unit Tests for SRT Subtitle Parser & Streaming Devices
 =============================================================================*/
 #include "zff/plugins/zstr_srt.h"
+#include "zff/plugins/zstr_srt_parser.h"
 #include "zff/plugins/zstr_text_overlay.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
@@ -10,6 +11,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <libavformat/avformat.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 
@@ -146,154 +148,26 @@ static void test_srt_parser_overlay_integration(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Test 2: SRT Network Transport Direct C API Loopback
- * --------------------------------------------------------------------------- */
-typedef struct {
-    zstr_srt_source_t *src;
-    uint8_t received_data[2048];
-    int received_len;
-    volatile bool done;
-} ReceiverArg;
-
-static void* srt_receiver_thread(void *arg)
-{
-    ReceiverArg *r = (ReceiverArg*)arg;
-    int total = 0;
-    while (total < 1000) {
-        int n = zstr_srt_source_read(r->src, r->received_data + total, (int)sizeof(r->received_data) - total);
-        if (n <= 0) break;
-        total += n;
-    }
-    r->received_len = total;
-    r->done = true;
-    return NULL;
-}
-
-static void test_srt_streaming_direct_loopback(void)
-{
-    printf("[TEST] Testing SRT Network Transport Direct C API Loopback...\n");
-
-    zstr_srt_config_t src_cfg = {
-        .mode = ZSTR_SRT_MODE_LISTENER,
-        .host = "127.0.0.1",
-        .port = 19120,
-        .latency_ms = 50,
-        .timeout_ms = 3000
-    };
-    zstr_srt_source_t *src = zstr_srt_source_create(&src_cfg);
-    assert(src != NULL);
-
-    ReceiverArg rx_arg = { .src = src, .received_len = 0, .done = false };
-    pthread_t th;
-    pthread_create(&th, NULL, srt_receiver_thread, &rx_arg);
-
-    /* Wait briefly for listener to be ready */
-    usleep(50000);
-
-    zstr_srt_config_t sink_cfg = {
-        .mode = ZSTR_SRT_MODE_CALLER,
-        .host = "127.0.0.1",
-        .port = 19120,
-        .latency_ms = 50,
-        .timeout_ms = 3000
-    };
-    zstr_srt_sink_t *sink = zstr_srt_sink_create(&sink_cfg);
-    assert(sink != NULL);
-
-    uint8_t tx_buf[1000];
-    for (int i = 0; i < 1000; i++) tx_buf[i] = (uint8_t)(i & 0xFF);
-
-    int written = zstr_srt_sink_write(sink, tx_buf, sizeof(tx_buf));
-    assert(written == sizeof(tx_buf));
-
-    pthread_join(th, NULL);
-    assert(rx_arg.done == true);
-    assert(rx_arg.received_len == sizeof(tx_buf));
-    assert(memcmp(rx_arg.received_data, tx_buf, sizeof(tx_buf)) == 0);
-
-    zstr_srt_sink_close(&sink);
-    zstr_srt_source_close(&src);
-    assert(sink == NULL && src == NULL);
-
-    printf("[PASS] SRT Network Transport Direct C API Loopback passed.\n");
-}
-
-/* ---------------------------------------------------------------------------
- * Test 3: SRT Encrypted Transmission (AES Passphrase)
- * --------------------------------------------------------------------------- */
-static void test_srt_encrypted_loopback(void)
-{
-    printf("[TEST] Testing SRT Encrypted Loopback with AES passphrase...\n");
-
-    const char *passphrase = "zstreamer_secure_aes_key";
-    zstr_srt_config_t src_cfg = {
-        .mode = ZSTR_SRT_MODE_LISTENER,
-        .host = "127.0.0.1",
-        .port = 19122,
-        .latency_ms = 50,
-        .passphrase = passphrase,
-        .pbkeylen = 16,
-        .timeout_ms = 3000
-    };
-    zstr_srt_source_t *src = zstr_srt_source_create(&src_cfg);
-    assert(src != NULL);
-
-    ReceiverArg rx_arg = { .src = src, .received_len = 0, .done = false };
-    pthread_t th;
-    pthread_create(&th, NULL, srt_receiver_thread, &rx_arg);
-
-    usleep(50000);
-
-    zstr_srt_config_t sink_cfg = {
-        .mode = ZSTR_SRT_MODE_CALLER,
-        .host = "127.0.0.1",
-        .port = 19122,
-        .latency_ms = 50,
-        .passphrase = passphrase,
-        .pbkeylen = 16,
-        .timeout_ms = 3000
-    };
-    zstr_srt_sink_t *sink = zstr_srt_sink_create(&sink_cfg);
-    assert(sink != NULL);
-
-    uint8_t tx_buf[1000];
-    for (int i = 0; i < 1000; i++) tx_buf[i] = (uint8_t)((i ^ 0xAA) & 0xFF);
-
-    int written = zstr_srt_sink_write(sink, tx_buf, sizeof(tx_buf));
-    assert(written == sizeof(tx_buf));
-
-    pthread_join(th, NULL);
-    assert(rx_arg.done == true);
-    assert(rx_arg.received_len == sizeof(tx_buf));
-    assert(memcmp(rx_arg.received_data, tx_buf, sizeof(tx_buf)) == 0);
-
-    zstr_srt_sink_close(&sink);
-    zstr_srt_source_close(&src);
-
-    printf("[PASS] SRT Encrypted Loopback passed.\n");
-}
-
-/* ---------------------------------------------------------------------------
- * Test 4: FFmpeg AVInputFormat / AVOutputFormat Device Loopback
+ * Test 2: SRT Network Transport via standard FFmpeg Devices
  * --------------------------------------------------------------------------- */
 typedef struct {
     AVFormatContext *in_ctx;
     AVPacket *pkt;
     int result;
     volatile bool done;
-} FFDemuxArg;
+} SrtDemuxThreadArg;
 
-static void* ff_demux_thread(void *arg)
+static void* srt_demux_read_thread(void *arg)
 {
-    FFDemuxArg *d = (FFDemuxArg*)arg;
+    SrtDemuxThreadArg *d = (SrtDemuxThreadArg*)arg;
     d->result = av_read_frame(d->in_ctx, d->pkt);
     d->done = true;
     return NULL;
 }
 
-static void test_srt_ffmpeg_device_loopback(void)
+static void test_srt_device_loopback(void)
 {
-    printf("[TEST] Testing SRT FFmpeg Device Loopback (zstr_srt_src & zstr_srt_sink)...\n");
+    printf("[TEST] Testing SRT FFmpeg Device Loopback (srt://127.0.0.1:19120)...\n");
 
     const AVInputFormat *in_fmt = zff_find_input_format("zstr_srt_src");
     assert(in_fmt != NULL);
@@ -301,27 +175,21 @@ static void test_srt_ffmpeg_device_loopback(void)
     const AVOutputFormat *out_fmt = zff_find_output_format("zstr_srt_sink");
     assert(out_fmt != NULL);
 
-    /* Open Demuxer (Listener on port 19124) */
+    /* Open Demuxer (Listener on port 19120) */
     AVFormatContext *in_ctx = NULL;
-    AVDictionary *opts = NULL;
-    av_dict_set(&opts, "mode", "listener", 0);
-    av_dict_set(&opts, "port", "19124", 0);
-    av_dict_set(&opts, "latency", "50", 0);
-
-    int ret = avformat_open_input(&in_ctx, "srt://127.0.0.1:19124?mode=listener&latency=50", in_fmt, &opts);
-    av_dict_free(&opts);
+    int ret = avformat_open_input(&in_ctx, "srt://127.0.0.1:19120?mode=listener&latency=50", in_fmt, NULL);
     assert(ret == 0 && in_ctx != NULL);
 
     AVPacket *rx_pkt = av_packet_alloc();
-    FFDemuxArg demux_arg = { .in_ctx = in_ctx, .pkt = rx_pkt, .result = -1, .done = false };
+    SrtDemuxThreadArg demux_arg = { .in_ctx = in_ctx, .pkt = rx_pkt, .result = -1, .done = false };
     pthread_t th;
-    pthread_create(&th, NULL, ff_demux_thread, &demux_arg);
+    pthread_create(&th, NULL, srt_demux_read_thread, &demux_arg);
 
-    usleep(50000);
+    usleep(50000); /* 50ms wait for listener */
 
-    /* Open Muxer (Caller to port 19124) */
+    /* Open Muxer (Caller to port 19120) */
     AVFormatContext *out_ctx = NULL;
-    ret = avformat_alloc_output_context2(&out_ctx, out_fmt, "zstr_srt_sink", "srt://127.0.0.1:19124?mode=caller&latency=50");
+    ret = avformat_alloc_output_context2(&out_ctx, out_fmt, "zstr_srt_sink", "srt://127.0.0.1:19120?mode=caller&latency=50");
     assert(ret >= 0 && out_ctx != NULL);
 
     AVStream *st = avformat_new_stream(out_ctx, NULL);
@@ -332,9 +200,10 @@ static void test_srt_ffmpeg_device_loopback(void)
     assert(ret >= 0);
 
     AVPacket *tx_pkt = av_packet_alloc();
-    av_new_packet(tx_pkt, 512);
-    memset(tx_pkt->data, 0x5A, 512);
+    av_new_packet(tx_pkt, 1000);
+    for (int i = 0; i < 1000; i++) tx_pkt->data[i] = (uint8_t)(i & 0xFF);
     tx_pkt->stream_index = 0;
+    tx_pkt->pts = 100;
 
     ret = av_write_frame(out_ctx, tx_pkt);
     assert(ret == 0);
@@ -342,8 +211,8 @@ static void test_srt_ffmpeg_device_loopback(void)
     pthread_join(th, NULL);
     assert(demux_arg.done == true);
     assert(demux_arg.result == 0);
-    assert(rx_pkt->size == 512);
-    assert(rx_pkt->data[0] == 0x5A);
+    assert(rx_pkt->size == 1000);
+    assert(memcmp(rx_pkt->data, tx_pkt->data, 1000) == 0);
 
     av_write_trailer(out_ctx);
     avformat_free_context(out_ctx);
@@ -352,13 +221,102 @@ static void test_srt_ffmpeg_device_loopback(void)
     av_packet_free(&rx_pkt);
 
     printf("[PASS] SRT FFmpeg Device Loopback passed.\n");
-    fflush(stdout);
+}
+
+/* ---------------------------------------------------------------------------
+ * Test 3: SRT Encrypted Transmission (AES Passphrase) via FFmpeg Devices
+ * --------------------------------------------------------------------------- */
+static void test_srt_encrypted_loopback(void)
+{
+    printf("[TEST] Testing SRT Encrypted Loopback with AES passphrase...\n");
+
+    const AVInputFormat *in_fmt = zff_find_input_format("zstr_srt_src");
+    assert(in_fmt != NULL);
+
+    const AVOutputFormat *out_fmt = zff_find_output_format("zstr_srt_sink");
+    assert(out_fmt != NULL);
+
+    const char *in_url = "srt://127.0.0.1:19122?mode=listener&latency=50&passphrase=zstreamer_secure_aes_key&pbkeylen=16";
+    const char *out_url = "srt://127.0.0.1:19122?mode=caller&latency=50&passphrase=zstreamer_secure_aes_key&pbkeylen=16";
+
+    AVFormatContext *in_ctx = NULL;
+    int ret = avformat_open_input(&in_ctx, in_url, in_fmt, NULL);
+    assert(ret == 0 && in_ctx != NULL);
+
+    AVPacket *rx_pkt = av_packet_alloc();
+    SrtDemuxThreadArg demux_arg = { .in_ctx = in_ctx, .pkt = rx_pkt, .result = -1, .done = false };
+    pthread_t th;
+    pthread_create(&th, NULL, srt_demux_read_thread, &demux_arg);
+
+    usleep(50000);
+
+    AVFormatContext *out_ctx = NULL;
+    ret = avformat_alloc_output_context2(&out_ctx, out_fmt, "zstr_srt_sink", out_url);
+    assert(ret >= 0 && out_ctx != NULL);
+
+    AVStream *st = avformat_new_stream(out_ctx, NULL);
+    assert(st != NULL);
+    st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+
+    ret = avformat_write_header(out_ctx, NULL);
+    assert(ret >= 0);
+
+    AVPacket *tx_pkt = av_packet_alloc();
+    av_new_packet(tx_pkt, 1000);
+    for (int i = 0; i < 1000; i++) tx_pkt->data[i] = (uint8_t)((i ^ 0xAA) & 0xFF);
+    tx_pkt->stream_index = 0;
+    tx_pkt->pts = 200;
+
+    ret = av_write_frame(out_ctx, tx_pkt);
+    assert(ret == 0);
+
+    pthread_join(th, NULL);
+    assert(demux_arg.done == true);
+    assert(demux_arg.result == 0);
+    assert(rx_pkt->size == 1000);
+    assert(memcmp(rx_pkt->data, tx_pkt->data, 1000) == 0);
+
+    av_write_trailer(out_ctx);
+    avformat_free_context(out_ctx);
+    avformat_close_input(&in_ctx);
+    av_packet_free(&tx_pkt);
+    av_packet_free(&rx_pkt);
+
+    printf("[PASS] SRT Encrypted Loopback passed.\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Test 4: SRT Device AVDictionary Options Parsing
+ * --------------------------------------------------------------------------- */
+static void test_srt_device_options(void)
+{
+    printf("[TEST] Testing SRT Device AVDictionary options parsing...\n");
+
+    const AVInputFormat *in_fmt = zff_find_input_format("zstr_srt_src");
+    assert(in_fmt != NULL);
+
+    AVFormatContext *in_ctx = NULL;
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "mode", "listener", 0);
+    av_dict_set(&opts, "port", "19126", 0);
+    av_dict_set(&opts, "latency", "80", 0);
+    av_dict_set(&opts, "passphrase", "dict_passphrase_test", 0);
+    av_dict_set(&opts, "pbkeylen", "16", 0);
+    av_dict_set(&opts, "timeout", "2000", 0);
+
+    int ret = avformat_open_input(&in_ctx, "srt://127.0.0.1:19126", in_fmt, &opts);
+    av_dict_free(&opts);
+    assert(ret == 0 && in_ctx != NULL);
+
+    avformat_close_input(&in_ctx);
+    printf("[PASS] SRT Device AVDictionary options parsing passed.\n");
 }
 
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    setvbuf(stdout, NULL, _IONBF, 0);
+    zff_plugins_register_all();
+
     printf("============================================================\n");
     printf("  zff SRT Suite Unit Tests (Subtitle Parser + Transport)\n");
     printf("============================================================\n");
@@ -366,9 +324,9 @@ int main(int argc, char **argv)
     test_srt_parser_memory();
     test_srt_parser_file();
     test_srt_parser_overlay_integration();
-    test_srt_streaming_direct_loopback();
+    test_srt_device_loopback();
     test_srt_encrypted_loopback();
-    test_srt_ffmpeg_device_loopback();
+    test_srt_device_options();
 
     printf("\nAll SRT unit tests passed successfully!\n");
     _exit(0);

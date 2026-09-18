@@ -118,25 +118,29 @@ static void test_rtp_udp_loopback_integration(void)
 {
     printf("[TEST] Testing End-to-End RTP over UDP Network Loopback (127.0.0.1:15008)...\n");
 
-    zstr_net_config_t src_cfg = {
-        .protocol = ZSTR_NET_PROTO_UDP,
-        .host = "127.0.0.1",
-        .port = 15008,
-        .buffer_size = 65536,
-        .timeout_ms = 1000
-    };
-    zstr_net_source_t *net_src = zstr_net_source_create(&src_cfg);
-    assert(net_src != NULL);
+    const AVInputFormat *in_fmt = zff_find_input_format("zstr_net_src");
+    assert(in_fmt != NULL);
 
-    zstr_net_config_t sink_cfg = {
-        .protocol = ZSTR_NET_PROTO_UDP,
-        .host = "127.0.0.1",
-        .port = 15008,
-        .buffer_size = 65536,
-        .timeout_ms = 1000
-    };
-    zstr_net_sink_t *net_sink = zstr_net_sink_create(&sink_cfg);
-    assert(net_sink != NULL);
+    const AVOutputFormat *out_fmt = zff_find_output_format("zstr_net_sink");
+    assert(out_fmt != NULL);
+
+    AVFormatContext *in_ctx = NULL;
+    AVDictionary *in_opts = NULL;
+    av_dict_set(&in_opts, "port", "15008", 0);
+    av_dict_set(&in_opts, "timeout", "1000", 0);
+    int ret = avformat_open_input(&in_ctx, "udp://127.0.0.1:15008", in_fmt, &in_opts);
+    av_dict_free(&in_opts);
+    assert(ret == 0 && in_ctx != NULL);
+
+    AVFormatContext *out_ctx = NULL;
+    ret = avformat_alloc_output_context2(&out_ctx, out_fmt, "zstr_net_sink", "udp://127.0.0.1:15008");
+    assert(ret >= 0 && out_ctx != NULL);
+
+    AVStream *st = avformat_new_stream(out_ctx, NULL);
+    assert(st != NULL);
+    st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+    ret = avformat_write_header(out_ctx, NULL);
+    assert(ret >= 0);
 
     zstr_rtp_payloader_t *pay = zstr_rtp_payloader_create(ZSTR_RTP_CODEC_H264, 96, 0xCAFEBABE, 90000, 1400);
     zstr_rtp_depayloader_t *depay = zstr_rtp_depayloader_create(ZSTR_RTP_CODEC_H264, 96, 90000);
@@ -153,13 +157,14 @@ static void test_rtp_udp_loopback_integration(void)
     /* Payloader -> RTP packets */
     AVPacket **rtp_pkts = NULL;
     int nb_pkts = 0;
-    int ret = zstr_rtp_payloader_process(pay, tx_frame, &rtp_pkts, &nb_pkts);
+    ret = zstr_rtp_payloader_process(pay, tx_frame, &rtp_pkts, &nb_pkts);
     assert(ret == 0 && nb_pkts > 1);
 
     /* Send RTP packets over UDP */
     for (int i = 0; i < nb_pkts; i++) {
-        ret = zstr_net_sink_write_packet(net_sink, rtp_pkts[i]);
-        assert(ret > 0);
+        rtp_pkts[i]->stream_index = 0;
+        ret = av_write_frame(out_ctx, rtp_pkts[i]);
+        assert(ret == 0);
     }
 
     /* Receive RTP packets over UDP and Depayload */
@@ -167,7 +172,7 @@ static void test_rtp_udp_loopback_integration(void)
     bool ready = false;
     for (int i = 0; i < nb_pkts; i++) {
         AVPacket *rx_rtp = av_packet_alloc();
-        ret = zstr_net_source_read_packet(net_src, rx_rtp);
+        ret = av_read_frame(in_ctx, rx_rtp);
         assert(ret == 0);
 
         ret = zstr_rtp_depayloader_process(depay, rx_rtp, rx_frame, &ready);
@@ -185,8 +190,10 @@ static void test_rtp_udp_loopback_integration(void)
     av_packet_free(&rx_frame);
     zstr_rtp_payloader_free(&pay);
     zstr_rtp_depayloader_free(&depay);
-    zstr_net_source_close(&net_src);
-    zstr_net_sink_close(&net_sink);
+
+    av_write_trailer(out_ctx);
+    avformat_free_context(out_ctx);
+    avformat_close_input(&in_ctx);
 
     printf("[PASS] End-to-End RTP over UDP Network Loopback passed.\n");
 }

@@ -5,6 +5,7 @@
 
 #include "zff/plugins/zstr_st2110.h"
 #include "zff/plugins/zstr_net.h"
+#include "../streaming/zstr_net_internal.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
 #include <stdlib.h>

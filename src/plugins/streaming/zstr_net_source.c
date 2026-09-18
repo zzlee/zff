@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 
 #include "zff/plugins/zstr_net.h"
+#include "zstr_net_internal.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
 #include <stdlib.h>

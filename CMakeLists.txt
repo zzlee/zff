@@ -26,6 +26,7 @@ pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(ALSA REQUIRED alsa)
 pkg_check_modules(GL REQUIRED gl)
 pkg_check_modules(X11 REQUIRED x11)
+pkg_check_modules(FREETYPE freetype2)
 
 # Include directories
 include_directories(
@@ -40,6 +41,7 @@ include_directories(
     ${ALSA_INCLUDE_DIRS}
     ${GL_INCLUDE_DIRS}
     ${X11_INCLUDE_DIRS}
+    ${FREETYPE_INCLUDE_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -72,6 +74,7 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_alsa_sink.c
     src/plugins/audio/zstr_amix.c
     src/plugins/video/zstr_glsink.c
+    src/plugins/video/zstr_text_overlay.c
 )
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -87,6 +90,7 @@ target_link_libraries(zff-plugins
     ${ALSA_LIBRARIES}
     ${GL_LIBRARIES}
     ${X11_LIBRARIES}
+    ${FREETYPE_LIBRARIES}
     m
     pthread
 )
@@ -138,6 +142,10 @@ if(BUILD_TESTS)
     add_executable(test_glsink tests/test_glsink.c)
     target_link_libraries(test_glsink PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES})
     add_test(NAME test_glsink COMMAND test_glsink)
+
+    add_executable(test_text_overlay tests/test_text_overlay.c)
+    target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
+    add_test(NAME test_text_overlay COMMAND test_text_overlay)
 endif()
 
 message(STATUS "zff configured successfully.")

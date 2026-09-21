@@ -241,6 +241,10 @@ if(BUILD_TESTS)
         add_executable(test_webrtc_whip tests/test_webrtc_whip.c)
         target_link_libraries(test_webrtc_whip PRIVATE zff-plugins zff-core pthread)
         add_test(NAME test_webrtc_whip COMMAND test_webrtc_whip)
+
+        add_executable(test_webrtc_page tests/test_webrtc_page.c)
+        target_link_libraries(test_webrtc_page PRIVATE zff-plugins zff-core pthread)
+        add_test(NAME test_webrtc_page COMMAND test_webrtc_page)
     endif()
 
     add_executable(test_st2110 tests/test_st2110.c)
@@ -253,3 +257,6 @@ if(BUILD_TESTS)
 endif()
 
 message(STATUS "zff configured successfully.")
+
+# Examples (manual demos, not part of ctest)
+add_subdirectory(examples)

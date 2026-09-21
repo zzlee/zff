@@ -90,7 +90,7 @@ static void server_route(struct zstr_sig_server *s, int from_ws,
 
     if (strcmp(verb, "OFFER") != 0 && strcmp(verb, "ANSWER") != 0 &&
 
-        strcmp(verb, "CANDIDATE") != 0)
+        strcmp(verb, "CANDIDATE") != 0 && strcmp(verb, "MSG") != 0)
 
         return;
 
@@ -406,6 +406,14 @@ static void client_on_message(int ws, const char *message, int size, void *ptr)
 
         body = body ? body + 1 : "";
 
+    } else if (strcmp(verb, "MSG") == 0) {
+
+        type = ZSTR_SIG_MSG;
+
+        body = strchr(copy, '\n');
+
+        body = body ? body + 1 : "";
+
     } else if (strcmp(verb, "CANDIDATE") == 0) {
 
         type = ZSTR_SIG_CANDIDATE;
@@ -630,6 +638,25 @@ int zstr_sig_client_send_candidate(zstr_sig_client_t *c, const char *mid,
 
     return ret;
 
+}
+
+int zstr_sig_client_send_msg(zstr_sig_client_t *c, const char *text)
+{
+    if (!c || !text) return -1;
+
+    size_t cap = strlen(text) + 256;
+
+    char *buf = malloc(cap);
+
+    if (!buf) return -1;
+
+    snprintf(buf, cap, "MSG %s\n%s", c->room, text);
+
+    int ret = client_send(c, buf);
+
+    free(buf);
+
+    return ret;
 }
 
 void zstr_sig_client_free(zstr_sig_client_t **pc)

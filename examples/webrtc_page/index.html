@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zff WebRTC Publish Demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 1em auto; padding: 0 1em; }
+  video { width: 100%; max-width: 420px; background: #111; border-radius: 8px; }
+  .row { display: flex; gap: 1em; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 280px; }
+  #log { height: 220px; overflow-y: scroll; border: 1px solid #ccc; border-radius: 8px; padding: .5em; font-family: monospace; font-size: 12px; }
+  #chat { height: 120px; overflow-y: scroll; border: 1px solid #ccc; border-radius: 8px; padding: .5em; font-size: 13px; }
+  button { margin: .2em .2em .2em 0; padding: .4em .9em; }
+  input[type=text] { padding: .4em; }
+  #status b { margin-right: 1em; }
+  .note { color: #555; font-size: 13px; }
+</style>
+</head>
+<body>
+<h2>zff WebRTC Publish Demo</h2>
+<p class="note">Publish camera/mic to the zff C demo (<code>demo_webrtc_page</code>) over WebRTC,
+signaled through its WebSocket server. Remote video is not served in v1 (the C side has no
+encoder yet) — watch the C console for live frame stats instead.</p>
+
+<div>
+  <label>Signaling URL <input type="text" id="wsurl" size="28" value="ws://localhost:8610"></label>
+  <label>Room <input type="text" id="room" size="10" value="demo"></label>
+  <button id="btnConnect">Connect signaling</button>
+  <button id="btnPublish">Start camera + publish</button>
+  <button id="btnStop">Stop</button>
+</div>
+<div id="status"><b>WS:</b><span id="stWs">-</span> <b>PC:</b><span id="stPc">-</span> <b> far stats:</b><span id="stStats">-</span></div>
+
+<div class="row">
+  <div class="col"><h3>Local preview</h3><video id="local" autoplay muted playsinline></video></div>
+  <div class="col"><h3>Remote (reserved for v2)</h3><video id="remote" autoplay playsinline></video></div>
+</div>
+
+<div class="row">
+  <div class="col">
+    <h3>Actions</h3>
+    <button id="btnKeyframe">Request keyframe (via C)</button>
+    <div>
+      <input type="text" id="chatIn" size="30" placeholder="chat message">
+      <button id="btnChat">Send (data channel)</button>
+    </div>
+    <div id="chat"></div>
+  </div>
+  <div class="col">
+    <h3>Log</h3>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+let ws = null, pc = null, dc = null, localStream = null;
+const room = () => document.getElementById('room').value.trim() || 'demo';
+const $ = id => document.getElementById(id);
+function log(...a) {
+  const el = $('log');
+  el.textContent += a.join(' ') + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function chat(who, text) {
+  const el = $('chat');
+  el.textContent += who + ': ' + text + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function setSt() {
+  $('stWs').textContent = ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : '-';
+  $('stPc').textContent = pc ? pc.connectionState : '-';
+}
+
+$('btnConnect').onclick = () => {
+  if (ws) ws.close();
+  ws = new WebSocket($('wsurl').value.trim());
+  ws.onopen = () => { log('WS open, JOIN', room()); ws.send('JOIN ' + room()); setSt(); };
+  ws.onclose = () => { log('WS closed'); setSt(); };
+  ws.onerror = e => log('WS error', e);
+  ws.onmessage = onSignal;
+  setSt();
+};
+
+async function onSignal(ev) {
+  const msg = ev.data;
+  const nl = msg.indexOf('\n');
+  const head = nl < 0 ? msg : msg.slice(0, nl);
+  const [verb, r] = head.split(' ');
+  const body = nl < 0 ? '' : msg.slice(nl + 1);
+  if (r !== room()) return;
+  log('SIG <-', verb, body.length + 'B');
+  if (verb === 'ANSWER') {
+    await pc.setRemoteDescription({ type: 'answer', sdp: body });
+    log('remote answer applied');
+  } else if (verb === 'CANDIDATE') {
+    const i = body.indexOf('\n');
+    const mid = body.slice(0, i);
+    const cand = body.slice(i + 1);
+    try { await pc.addIceCandidate({ candidate: cand, sdpMid: mid }); }
+    catch (e) { log('addIceCandidate failed (harmless pre-remote race):', e); }
+  } else if (verb === 'MSG') {
+    if (body.startsWith('STATS ')) $('stStats').textContent = body.slice(6);
+    else chat('C', body);
+  }
+  setSt();
+}
+
+$('btnPublish').onclick = async () => {
+  if (!ws || ws.readyState !== 1) { log('connect signaling first'); return; }
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  $('local').srcObject = localStream;
+  pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = () => { log('PC state:', pc.connectionState); setSt(); };
+  pc.ontrack = e => { log('remote track:', e.track.kind); $('remote').srcObject = e.streams[0]; };
+  pc.onicecandidate = e => {
+    if (e.candidate) ws.send(`CANDIDATE ${room()}\n${e.candidate.sdpMid}\n${e.candidate.candidate}`);
+  };
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  dc = pc.createDataChannel('chat');
+  dc.onopen = () => { log('DC open'); chat('*', 'data channel open'); };
+  dc.onmessage = e => chat('C', e.data);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(`OFFER ${room()}\n${offer.sdp}`);
+  log('offer sent, waiting for answer...');
+  setSt();
+};
+
+$('btnStop').onclick = () => {
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  if (pc) pc.close();
+  pc = null; localStream = null;
+  $('local').srcObject = null;
+  log('stopped'); setSt();
+};
+
+$('btnKeyframe').onclick = () => {
+  if (ws && ws.readyState === 1) { ws.send(`MSG ${room()}\nKEYFRAME 0`); log('keyframe requested'); }
+};
+
+$('btnChat').onclick = () => {
+  const t = $('chatIn').value;
+  if (dc && dc.readyState === 'open' && t) { dc.send(t); chat('me', t); $('chatIn').value = ''; }
+  else log('DC not open');
+};
+</script>
+</body>
+</html>

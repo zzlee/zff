@@ -214,6 +214,68 @@ static void test_signaling_handshake_and_media(void)
 
 }
 
+typedef struct {
+    char text[256];
+    volatile int got;
+} msg_result_t;
+
+static void msg_on_message(zstr_sig_msg_t type, const char *payload,
+                           const char *mid, void *ud)
+{
+    (void)mid;
+    msg_result_t *r = ud;
+    if (type == ZSTR_SIG_MSG && payload) {
+        snprintf(r->text, sizeof(r->text), "%s", payload);
+        r->got = 1;
+    }
+}
+
+static void test_signaling_msg_routing(void)
+{
+    printf("[TEST] MSG routing between two clients...\n");
+
+    zstr_sig_server_t *srv = zstr_sig_server_start(0);
+    CHECK(srv != NULL);
+    int port = zstr_sig_server_port(srv);
+    CHECK(port > 0);
+    char url[128];
+    snprintf(url, sizeof(url), "ws://127.0.0.1:%d", port);
+
+    msg_result_t ra;
+    memset(&ra, 0, sizeof(ra));
+    msg_result_t rb;
+    memset(&rb, 0, sizeof(rb));
+
+    zstr_sig_client_t *ca =
+        zstr_sig_client_connect(url, "msgroom", msg_on_message, &ra, 5000);
+    CHECK(ca != NULL);
+    zstr_sig_client_t *cb =
+        zstr_sig_client_connect(url, "msgroom", msg_on_message, &rb, 5000);
+    CHECK(cb != NULL);
+    /* Different room must NOT receive it */
+    msg_result_t rc;
+    memset(&rc, 0, sizeof(rc));
+    zstr_sig_client_t *cc =
+        zstr_sig_client_connect(url, "otherroom", msg_on_message, &rc, 5000);
+    CHECK(cc != NULL);
+
+    usleep(200000); /* let JOINs land */
+    CHECK(zstr_sig_client_send_msg(ca, "hello-b") == 0);
+
+    for (int i = 0; i < 50 && !rb.got; i++) usleep(100000);
+    CHECK(rb.got == 1);
+    CHECK(strcmp(rb.text, "hello-b") == 0);
+    CHECK(rc.got == 0);
+
+    zstr_sig_client_free(&ca);
+    zstr_sig_client_free(&cb);
+    zstr_sig_client_free(&cc);
+    zstr_sig_server_free(&srv);
+
+    printf("[PASS] MSG routing passed.\n");
+
+}
+
 int main(void)
 
 {
@@ -225,6 +287,8 @@ int main(void)
     printf("====================================================\n");
 
     test_signaling_handshake_and_media();
+
+    test_signaling_msg_routing();
 
     printf("====================================================\n");
 

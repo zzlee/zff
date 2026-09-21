@@ -11,6 +11,7 @@
       either -> server: "OFFER <room>\n<sdp>"
                         "ANSWER <room>\n<sdp>"
                         "CANDIDATE <room>\n<mid>\n<candidate>"
+                        "MSG <room>\n<text>"
       server -> peer:   same verb, routed to the other client(s) in <room>
  =============================================================================*/
 #pragma once
@@ -38,6 +39,7 @@ typedef enum {
     ZSTR_SIG_OFFER = 0,
     ZSTR_SIG_ANSWER,
     ZSTR_SIG_CANDIDATE,
+    ZSTR_SIG_MSG, /* generic peer text (STAT/CHAT); routed like the rest */
 } zstr_sig_msg_t;
 
 /** Incoming routed message. For CANDIDATE, `mid` is set; sdp_or_cand holds
@@ -53,6 +55,7 @@ int zstr_sig_client_send_offer(zstr_sig_client_t *c, const char *sdp);
 int zstr_sig_client_send_answer(zstr_sig_client_t *c, const char *sdp);
 int zstr_sig_client_send_candidate(zstr_sig_client_t *c, const char *mid,
                                    const char *candidate);
+int zstr_sig_client_send_msg(zstr_sig_client_t *c, const char *text);
 void zstr_sig_client_free(zstr_sig_client_t **c);
 
 #ifdef __cplusplus

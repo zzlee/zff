@@ -19,6 +19,8 @@
 
 #include <libavutil/opt.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 
 typedef struct GLSinkContext {
     const AVClass *av_class;
@@ -48,6 +50,12 @@ typedef struct GLSinkContext {
     GLuint prog_yuv420p;
     GLuint prog_nv12;
     GLuint prog_rgb;
+
+    /* sws fallback for non-native formats (NV16/YUYV/BGR/RGBA/...) */
+    struct SwsContext *sws;
+    enum AVPixelFormat sws_in_fmt;
+    uint8_t *rgb_scratch;
+    int rgb_stride;
 
     int64_t frames_rendered;
 } GLSinkContext;
@@ -91,6 +99,20 @@ static const char *fs_yuv420p_source =
     "    float r = y + 1.402 * v;\n"
     "    float g = y - 0.344136 * u - 0.714136 * v;\n"
     "    float b = y + 1.772 * u;\n"
+    "    gl_FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);\n"
+    "}\n";
+
+static const char *fs_nv12_source =
+    "#version 120\n"
+    "uniform sampler2D y_tex;\n"
+    "uniform sampler2D uv_tex;\n"
+    "void main() {\n"
+    "    vec2 tc = gl_TexCoord[0].st;\n"
+    "    float y = texture2D(y_tex, tc).r;\n"
+    "    vec2 uv = texture2D(uv_tex, tc).ra - vec2(0.5, 0.5);\n"
+    "    float r = y + 1.402 * uv.y;\n"
+    "    float g = y - 0.344136 * uv.x - 0.714136 * uv.y;\n"
+    "    float b = y + 1.772 * uv.x;\n"
     "    gl_FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);\n"
     "}\n";
 
@@ -188,10 +210,14 @@ static int init_glx(GLSinkContext *ctx) {
     /* Compile shaders */
     GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
     GLuint fs_yuv = compile_shader(GL_FRAGMENT_SHADER, fs_yuv420p_source);
+    GLuint fs_nv12 = compile_shader(GL_FRAGMENT_SHADER, fs_nv12_source);
     GLuint fs_rgb = compile_shader(GL_FRAGMENT_SHADER, fs_rgb_source);
 
     if (vs && fs_yuv) {
         ctx->prog_yuv420p = link_program(vs, fs_yuv);
+    }
+    if (vs && fs_nv12) {
+        ctx->prog_nv12 = link_program(vs, fs_nv12);
     }
     if (vs && fs_rgb) {
         ctx->prog_rgb = link_program(vs, fs_rgb);
@@ -199,12 +225,14 @@ static int init_glx(GLSinkContext *ctx) {
 
     if (vs) glDeleteShader(vs);
     if (fs_yuv) glDeleteShader(fs_yuv);
+    if (fs_nv12) glDeleteShader(fs_nv12);
     if (fs_rgb) glDeleteShader(fs_rgb);
 
     /* Textures */
     glGenTextures(1, &ctx->tex_y);
     glGenTextures(1, &ctx->tex_u);
     glGenTextures(1, &ctx->tex_v);
+    glGenTextures(1, &ctx->tex_uv);
     glGenTextures(1, &ctx->tex_rgb);
 
     glBindTexture(GL_TEXTURE_2D, ctx->tex_y);
@@ -224,6 +252,12 @@ static int init_glx(GLSinkContext *ctx) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, ctx->width / 2, ctx->height / 2, 0,
                  GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    glBindTexture(GL_TEXTURE_2D, ctx->tex_uv);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, ctx->width / 2, ctx->height / 2, 0,
+                 GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, NULL);
 
     glBindTexture(GL_TEXTURE_2D, ctx->tex_rgb);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -285,7 +319,22 @@ static int glsink_write_packet(AVFormatContext *s, AVPacket *pkt) {
         glBindTexture(GL_TEXTURE_2D, ctx->tex_rgb);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pkt->data);
         glUniform1i(glGetUniformLocation(ctx->prog_rgb, "rgb_tex"), 0);
-    } else if (ctx->prog_yuv420p) {
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_NV12 && ctx->prog_nv12) {
+        const uint8_t *y_plane = pkt->data;
+        const uint8_t *uv_plane = y_plane + (w * h);
+
+        glUseProgram(ctx->prog_nv12);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, ctx->tex_y);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, y_plane);
+        glUniform1i(glGetUniformLocation(ctx->prog_nv12, "y_tex"), 0);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, ctx->tex_uv);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w / 2, h / 2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv_plane);
+        glUniform1i(glGetUniformLocation(ctx->prog_nv12, "uv_tex"), 1);
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_YUV420P && ctx->prog_yuv420p) {
         /* Default YUV420P */
         const uint8_t *y_plane = pkt->data;
         const uint8_t *u_plane = y_plane + (w * h);
@@ -307,6 +356,36 @@ static int glsink_write_packet(AVFormatContext *s, AVPacket *pkt) {
         glBindTexture(GL_TEXTURE_2D, ctx->tex_v);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w / 2, h / 2, GL_LUMINANCE, GL_UNSIGNED_BYTE, v_plane);
         glUniform1i(glGetUniformLocation(ctx->prog_yuv420p, "v_tex"), 2);
+    } else if (ctx->prog_rgb) {
+        /* sws fallback for NV16/YUYV422/BGR/RGBA and friends: convert the
+         * (tightly packed) packet to RGB24 scratch, then the RGB path. */
+        if (!ctx->sws || ctx->sws_in_fmt != ctx->av_pix_fmt) {
+            if (ctx->sws) sws_freeContext(ctx->sws);
+            ctx->sws = sws_getContext(w, h, ctx->av_pix_fmt,
+                                      w, h, AV_PIX_FMT_RGB24,
+                                      SWS_BILINEAR, NULL, NULL, NULL);
+            ctx->sws_in_fmt = ctx->av_pix_fmt;
+        }
+        int need = w * h * 3;
+        if (!ctx->rgb_scratch) {
+            ctx->rgb_scratch = malloc(need > 0 ? need : 1);
+            ctx->rgb_stride = w * 3;
+        }
+        if (ctx->sws && ctx->rgb_scratch) {
+            const uint8_t *src[4] = { NULL };
+            int src_ls[4] = { 0 };
+            av_image_fill_arrays((uint8_t **)src, src_ls, pkt->data,
+                                 ctx->av_pix_fmt, w, h, 1);
+            uint8_t *dst[4] = { ctx->rgb_scratch, NULL, NULL, NULL };
+            int dst_ls[4] = { ctx->rgb_stride, 0, 0, 0 };
+            sws_scale(ctx->sws, src, src_ls, 0, h, dst, dst_ls);
+
+            glUseProgram(ctx->prog_rgb);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, ctx->tex_rgb);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, ctx->rgb_scratch);
+            glUniform1i(glGetUniformLocation(ctx->prog_rgb, "rgb_tex"), 0);
+        }
     }
 
     /* Render full screen quad */
@@ -337,9 +416,11 @@ static int glsink_write_trailer(AVFormatContext *s) {
         if (ctx->tex_y) glDeleteTextures(1, &ctx->tex_y);
         if (ctx->tex_u) glDeleteTextures(1, &ctx->tex_u);
         if (ctx->tex_v) glDeleteTextures(1, &ctx->tex_v);
+        if (ctx->tex_uv) glDeleteTextures(1, &ctx->tex_uv);
         if (ctx->tex_rgb) glDeleteTextures(1, &ctx->tex_rgb);
 
         if (ctx->prog_yuv420p) glDeleteProgram(ctx->prog_yuv420p);
+        if (ctx->prog_nv12) glDeleteProgram(ctx->prog_nv12);
         if (ctx->prog_rgb) glDeleteProgram(ctx->prog_rgb);
 
         glXMakeCurrent(ctx->x_display, None, NULL);
@@ -348,6 +429,13 @@ static int glsink_write_trailer(AVFormatContext *s) {
         XCloseDisplay(ctx->x_display);
         ctx->x_display = NULL;
     }
+
+    if (ctx->sws) {
+        sws_freeContext(ctx->sws);
+        ctx->sws = NULL;
+    }
+    free(ctx->rgb_scratch);
+    ctx->rgb_scratch = NULL;
 
     return 0;
 }

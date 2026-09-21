@@ -15,6 +15,8 @@ typedef struct {
     double volume;
     double pan;  /* -1.0 left to 1.0 right */
     bool mute;
+    double scale_norm; /* adaptive renormalization state (<= 0 = unset) */
+    bool was_active;   /* present in the previous process() call */
 
     /* Resampler for format matching */
     SwrContext *swr;
@@ -30,6 +32,7 @@ struct zstr_amix {
     enum AVSampleFormat out_sample_fmt;
     AVChannelLayout out_layout;
     int normalize;
+    double dropout_transition; /* seconds for renormalization ramp (0 = instant) */
 
     amix_slot_t slots[ZSTR_AMIX_MAX_INPUTS];
 
@@ -56,6 +59,7 @@ zstr_amix_t* zstr_amix_alloc(const char *opt_string) {
     m->channels = 2;
     m->out_sample_fmt = AV_SAMPLE_FMT_FLT;
     m->normalize = 0;
+    m->dropout_transition = 2.0;
     av_channel_layout_default(&m->out_layout, m->channels);
 
     for (int i = 0; i < ZSTR_AMIX_MAX_INPUTS; i++) {
@@ -95,6 +99,9 @@ zstr_amix_t* zstr_amix_alloc(const char *opt_string) {
                         else m->out_sample_fmt = AV_SAMPLE_FMT_FLT;
                     } else if (strcmp(key, "normalize") == 0) {
                         m->normalize = atoi(val);
+                    } else if (strcmp(key, "dropout_transition") == 0) {
+                        double t = atof(val);
+                        if (t >= 0.0) m->dropout_transition = t;
                     } else if (strcmp(key, "weights") == 0) {
                         char *w_copy = strdup(val);
                         if (w_copy) {
@@ -167,6 +174,9 @@ int zstr_amix_set_param(zstr_amix_t *m, const char *param_str) {
                 }
             } else if (strcmp(key, "normalize") == 0) {
                 m->normalize = atoi(val);
+            } else if (strcmp(key, "dropout_transition") == 0) {
+                double t = atof(val);
+                if (t >= 0.0) m->dropout_transition = t;
             }
         }
         token = strtok(NULL, ":,");
@@ -295,12 +305,72 @@ int zstr_amix_process(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFr
     }
     memset(m->fmix, 0, required_capacity * sizeof(double));
 
+    /* Dropout-aware per-input gains (FFmpeg amix calculate_scales adaptation).
+     * When normalize is on, each input carries 1/scale_norm so the mix stays
+     * level as sources come and go. scale_norm ramps toward its target over
+     * dropout_transition seconds instead of stepping, avoiding gain jumps.
+     * Muted/absent/zero-volume inputs get gain 0 and keep stale state so a
+     * returning source fades back smoothly. dropout_transition == 0 keeps
+     * the legacy instant 1/active_inputs behavior. */
+    double extra_gain[ZSTR_AMIX_MAX_INPUTS];
+    for (int i = 0; i < actual_inputs; i++) extra_gain[i] = 1.0;
+
+    if (m->normalize && max_samples > 0) {
+        if (m->dropout_transition > 0.0) {
+            double wsum = 0.0;
+            for (int i = 0; i < actual_inputs; i++) {
+                if (frames[i]) wsum += fabs(m->slots[i].volume);
+            }
+            if (wsum > 0.0) {
+                /* Exponential smoothing toward target: ~95% converged per
+                 * dropout_transition seconds, independent of distance. */
+                double alpha = 3.0 * max_samples /
+                               (m->dropout_transition * m->sample_rate);
+                if (alpha > 1.0) alpha = 1.0;
+                for (int i = 0; i < actual_inputs; i++) {
+                    if (!frames[i]) {
+                        m->slots[i].was_active = false;
+                        extra_gain[i] = 0.0;
+                        continue;
+                    }
+                    double av = fabs(m->slots[i].volume);
+                    if (av < 1e-12) {
+                        m->slots[i].was_active = true;
+                        extra_gain[i] = 0.0;
+                        continue;
+                    }
+                    double target = wsum / av;
+                    double *sn = &m->slots[i].scale_norm;
+                    if (*sn <= 0.0) {
+                        *sn = target; /* first use: snap, no ramp */
+                    } else if (!m->slots[i].was_active) {
+                        /* Returning source fades in from ~1/8 gain so the
+                         * re-add does not overshoot while others ramp down. */
+                        *sn = target * 8.0;
+                    } else {
+                        *sn += (target - *sn) * alpha;
+                    }
+                    m->slots[i].was_active = true;
+                    extra_gain[i] = (1.0 / *sn) * (m->slots[i].volume >= 0.0 ? 1.0 : -1.0);
+                }
+            } else {
+                for (int i = 0; i < actual_inputs; i++) {
+                    m->slots[i].was_active = (frames[i] != NULL);
+                    extra_gain[i] = 0.0;
+                }
+            }
+        } else if (active_inputs > 1) {
+            double g = 1.0 / active_inputs;
+            for (int i = 0; i < actual_inputs; i++) extra_gain[i] = frames[i] ? g : 0.0;
+        }
+    }
+
     /* Accumulate samples */
     for (int i = 0; i < actual_inputs; i++) {
         AVFrame *f = frames[i];
         if (!f) continue;
 
-        double volume = m->slots[i].volume;
+        double volume = m->slots[i].volume * extra_gain[i];
         double pan = m->slots[i].pan;
 
         double g0 = volume;
@@ -369,21 +439,21 @@ int zstr_amix_process(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFr
         return ret;
     }
 
-    /* Normalization or Soft-clipping Limiter */
-    double norm_scale = (m->normalize && active_inputs > 1) ? (1.0 / active_inputs) : 1.0;
+    /* Normalization is already folded into per-input gains above;
+     * without normalize the soft-clipping limiter bounds the sum. */
     size_t total_samples = (size_t)max_samples * m->channels;
 
     if (m->out_sample_fmt == AV_SAMPLE_FMT_FLT) {
         float *dst = (float *)out->data[0];
         for (size_t j = 0; j < total_samples; j++) {
-            double v = m->fmix[j] * norm_scale;
+            double v = m->fmix[j];
             if (!m->normalize) v = soft_clip(v);
             dst[j] = (float)v;
         }
     } else if (m->out_sample_fmt == AV_SAMPLE_FMT_S16) {
         int16_t *dst = (int16_t *)out->data[0];
         for (size_t j = 0; j < total_samples; j++) {
-            double v = m->fmix[j] * norm_scale;
+            double v = m->fmix[j];
             if (!m->normalize) v = soft_clip(v);
             if (v > 1.0) v = 1.0;
             if (v < -1.0) v = -1.0;
@@ -392,7 +462,7 @@ int zstr_amix_process(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFr
     } else if (m->out_sample_fmt == AV_SAMPLE_FMT_S32) {
         int32_t *dst = (int32_t *)out->data[0];
         for (size_t j = 0; j < total_samples; j++) {
-            double v = m->fmix[j] * norm_scale;
+            double v = m->fmix[j];
             if (!m->normalize) v = soft_clip(v);
             if (v > 1.0) v = 1.0;
             if (v < -1.0) v = -1.0;

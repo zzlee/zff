@@ -114,6 +114,118 @@ static void test_h264_fu_a_fragmentation(void)
     printf("[PASS] H.264 FU-A Fragmentation & Reassembly passed.\n");
 }
 
+static void test_h264_multi_nal_au(void)
+{
+    printf("[TEST] Testing H.264 multi-NAL access unit (SPS+PPS+IDR slice)...\n");
+
+    zstr_rtp_payloader_t *pay = zstr_rtp_payloader_create(ZSTR_RTP_CODEC_H264, 96, 0x55667788, 90000, 1400);
+    zstr_rtp_depayloader_t *depay = zstr_rtp_depayloader_create(ZSTR_RTP_CODEC_H264, 96, 90000);
+    assert(pay != NULL && depay != NULL);
+
+    /* AU: small SPS + small PPS + large IDR (forces FU-A) */
+    uint8_t au[64 + 32 + 3004];
+    int pos = 0;
+    au[pos++] = 0; au[pos++] = 0; au[pos++] = 0; au[pos++] = 1;
+    au[pos++] = 0x67;
+    for (int i = 0; i < 59; i++) au[pos++] = (uint8_t)(0x10 + i);
+    au[pos++] = 0; au[pos++] = 0; au[pos++] = 0; au[pos++] = 1;
+    au[pos++] = 0x68;
+    for (int i = 0; i < 27; i++) au[pos++] = (uint8_t)(0x30 + i);
+    au[pos++] = 0; au[pos++] = 0; au[pos++] = 0; au[pos++] = 1;
+    au[pos++] = 0x65;
+    for (int i = 0; i < 2999; i++) au[pos++] = (uint8_t)((i * 7) & 0xFF);
+    int au_len = pos;
+
+    AVPacket *in_pkt = av_packet_alloc();
+    av_new_packet(in_pkt, au_len);
+    memcpy(in_pkt->data, au, au_len);
+    in_pkt->pts = 360000;
+    in_pkt->time_base = (AVRational){ 1, 90000 };
+
+    AVPacket **rtp_pkts = NULL;
+    int nb_pkts = 0;
+    int ret = zstr_rtp_payloader_process(pay, in_pkt, &rtp_pkts, &nb_pkts);
+    assert(ret == 0);
+    assert(nb_pkts == 2 + 3); /* SPS + PPS single, IDR 2999B -> 3 FU-A frags at MTU 1400 */
+    /* Marker only on the last packet of the access unit */
+    for (int i = 0; i < nb_pkts; i++) {
+        bool m = (rtp_pkts[i]->data[1] & 0x80) != 0;
+        assert(m == (i == nb_pkts - 1));
+    }
+    /* Same RTP timestamp across the whole AU */
+    uint32_t ts0;
+    memcpy(&ts0, rtp_pkts[0]->data + 4, 4);
+    for (int i = 1; i < nb_pkts; i++)
+        assert(memcmp(rtp_pkts[i]->data + 4, &ts0, 4) == 0);
+
+    /* Depayload reassembles the full AU */
+    AVPacket *out_pkt = av_packet_alloc();
+    bool ready = false;
+    for (int i = 0; i < nb_pkts; i++) {
+        ret = zstr_rtp_depayloader_process(depay, rtp_pkts[i], out_pkt, &ready);
+        assert(ret == 0);
+        assert(ready == (i == nb_pkts - 1));
+    }
+    assert(ready == true);
+    assert(out_pkt->size == in_pkt->size);
+    assert(memcmp(out_pkt->data, in_pkt->data, in_pkt->size) == 0);
+
+    zstr_rtp_payloader_free_packets(rtp_pkts, nb_pkts);
+    av_packet_free(&in_pkt);
+    av_packet_free(&out_pkt);
+    zstr_rtp_payloader_free(&pay);
+    zstr_rtp_depayloader_free(&depay);
+
+    printf("[PASS] H.264 multi-NAL access unit passed.\n");
+}
+
+static void test_aac_rfc3640(void)
+{
+    printf("[TEST] Testing AAC RFC 3640 framing & reassembly...\n");
+
+    zstr_rtp_payloader_t *pay = zstr_rtp_payloader_create(ZSTR_RTP_CODEC_AAC, 97, 0x99AABBCC, 44100, 1400);
+    zstr_rtp_depayloader_t *depay = zstr_rtp_depayloader_create(ZSTR_RTP_CODEC_AAC, 97, 44100);
+    assert(pay != NULL && depay != NULL);
+
+    int raw_len = 256;
+    AVPacket *in_pkt = av_packet_alloc();
+    av_new_packet(in_pkt, raw_len);
+    for (int i = 0; i < raw_len; i++) in_pkt->data[i] = (uint8_t)(0x21 + i);
+    in_pkt->pts = 1024;
+    in_pkt->time_base = (AVRational){ 1, 44100 };
+
+    AVPacket **rtp_pkts = NULL;
+    int nb_pkts = 0;
+    int ret = zstr_rtp_payloader_process(pay, in_pkt, &rtp_pkts, &nb_pkts);
+    assert(ret == 0);
+    assert(nb_pkts == 1);
+    /* PT=97 with marker */
+    assert((rtp_pkts[0]->data[1] & 0x7F) == 97);
+    assert((rtp_pkts[0]->data[1] & 0x80) != 0);
+    /* AU-headers-length = 16 bits */
+    assert(rtp_pkts[0]->data[12] == 0 && rtp_pkts[0]->data[13] == 16);
+    /* AU-header size field = raw_len << 3 */
+    uint16_t au = (uint16_t)((rtp_pkts[0]->data[14] << 8) | rtp_pkts[0]->data[15]);
+    assert(au == (uint16_t)(raw_len << 3));
+    assert(rtp_pkts[0]->size == ZSTR_RTP_HEADER_LEN + 4 + raw_len);
+
+    AVPacket *out_pkt = av_packet_alloc();
+    bool ready = false;
+    ret = zstr_rtp_depayloader_process(depay, rtp_pkts[0], out_pkt, &ready);
+    assert(ret == 0);
+    assert(ready == true);
+    assert(out_pkt->size == raw_len);
+    assert(memcmp(out_pkt->data, in_pkt->data, raw_len) == 0);
+
+    zstr_rtp_payloader_free_packets(rtp_pkts, nb_pkts);
+    av_packet_free(&in_pkt);
+    av_packet_free(&out_pkt);
+    zstr_rtp_payloader_free(&pay);
+    zstr_rtp_depayloader_free(&depay);
+
+    printf("[PASS] AAC RFC 3640 framing passed.\n");
+}
+
 static void test_rtp_udp_loopback_integration(void)
 {
     printf("[TEST] Testing End-to-End RTP over UDP Network Loopback (127.0.0.1:15008)...\n");
@@ -209,6 +321,8 @@ int main(int argc, char **argv)
 
     test_h264_single_nal();
     test_h264_fu_a_fragmentation();
+    test_h264_multi_nal_au();
+    test_aac_rfc3640();
     test_rtp_udp_loopback_integration();
 
     printf("====================================================\n");

@@ -30,6 +30,38 @@ static AVFrame* create_solid_frame(int w, int h, enum AVPixelFormat fmt, uint8_t
     } else if (fmt == AV_PIX_FMT_NV12) {
         memset(frame->data[0], y_val, frame->linesize[0] * h);
         memset(frame->data[1], u_val, frame->linesize[1] * (h / 2));
+    } else if (fmt == AV_PIX_FMT_NV16) {
+        memset(frame->data[0], y_val, frame->linesize[0] * h);
+        memset(frame->data[1], u_val, frame->linesize[1] * h);
+    } else if (fmt == AV_PIX_FMT_YUYV422) {
+        for (int y = 0; y < h; y++) {
+            uint8_t *row = frame->data[0] + y * frame->linesize[0];
+            for (int x = 0; x < w; x += 2) {
+                row[x * 2 + 0] = y_val;
+                row[x * 2 + 1] = u_val;
+                row[x * 2 + 2] = y_val;
+                row[x * 2 + 3] = v_val;
+            }
+        }
+    } else if (fmt == AV_PIX_FMT_BGR24) {
+        for (int y = 0; y < h; y++) {
+            uint8_t *row = frame->data[0] + y * frame->linesize[0];
+            for (int x = 0; x < w; x++) {
+                row[x * 3 + 0] = v_val;
+                row[x * 3 + 1] = u_val;
+                row[x * 3 + 2] = y_val;
+            }
+        }
+    } else if (fmt == AV_PIX_FMT_BGRA) {
+        for (int y = 0; y < h; y++) {
+            uint8_t *row = frame->data[0] + y * frame->linesize[0];
+            for (int x = 0; x < w; x++) {
+                row[x * 4 + 0] = v_val;
+                row[x * 4 + 1] = u_val;
+                row[x * 4 + 2] = y_val;
+                row[x * 4 + 3] = 255;
+            }
+        }
     } else if (fmt == AV_PIX_FMT_RGB24) {
         for (int y = 0; y < h; y++) {
             uint8_t *row = frame->data[0] + y * frame->linesize[0];
@@ -72,8 +104,12 @@ static void test_formats_rendering(void)
     enum AVPixelFormat fmts[] = {
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NV12,
+        AV_PIX_FMT_NV16,
+        AV_PIX_FMT_YUYV422,
         AV_PIX_FMT_RGB24,
-        AV_PIX_FMT_RGBA
+        AV_PIX_FMT_BGR24,
+        AV_PIX_FMT_RGBA,
+        AV_PIX_FMT_BGRA
     };
 
     for (size_t i = 0; i < sizeof(fmts)/sizeof(fmts[0]); i++) {
@@ -96,7 +132,8 @@ static void test_formats_rendering(void)
 
         /* Verify some pixels in the text/box area were modified */
         bool modified = false;
-        if (fmt == AV_PIX_FMT_YUV420P || fmt == AV_PIX_FMT_NV12) {
+        if (fmt == AV_PIX_FMT_YUV420P ||
+            fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_NV16) {
             for (int y = 8; y < 40; y++) {
                 for (int x = 8; x < 60; x++) {
                     if (out->data[0][y * out->linesize[0] + x] != 16) {
@@ -106,11 +143,26 @@ static void test_formats_rendering(void)
                 }
                 if (modified) break;
             }
+        } else if (fmt == AV_PIX_FMT_YUYV422) {
+            for (int y = 8; y < 40; y++) {
+                uint8_t *row = out->data[0] + y * out->linesize[0];
+                for (int x = 8; x < 60; x += 2) {
+                    if (row[x * 2] != 16 || row[x * 2 + 2] != 16) {
+                        modified = true;
+                        break;
+                    }
+                }
+                if (modified) break;
+            }
         } else {
+            /* First byte is R for RGB/RGBA layouts, B for BGR/BGRA; the solid
+             * fill puts 16 in R and 128 in B, so check the R channel. */
+            int bpp = (fmt == AV_PIX_FMT_RGB24 || fmt == AV_PIX_FMT_BGR24) ? 3 : 4;
+            int roff = (fmt == AV_PIX_FMT_BGR24 || fmt == AV_PIX_FMT_BGRA) ? 2 : 0;
             for (int y = 8; y < 40; y++) {
                 uint8_t *row = out->data[0] + y * out->linesize[0];
                 for (int x = 8; x < 60; x++) {
-                    if (row[x * (fmt == AV_PIX_FMT_RGB24 ? 3 : 4)] != 16) {
+                    if (row[x * bpp + roff] != 16) {
                         modified = true;
                         break;
                     }

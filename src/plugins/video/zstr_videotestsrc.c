@@ -9,9 +9,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/parseutils.h>
+#include <libavutil/pixdesc.h>
 #include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
 
 #define QUEUE_CAPACITY 32
 
@@ -28,6 +31,7 @@ typedef struct VideoTestSrcContext {
 
     char *video_size;
     char *framerate;
+    char *pixel_format;
     int pattern;
     int realtime;
     int64_t num_frames;
@@ -36,6 +40,12 @@ typedef struct VideoTestSrcContext {
     int height;
     AVRational frame_rate;
     int frame_size;
+    enum AVPixelFormat pix_fmt;
+
+    /* Non-YUV420P output: render master then sws-convert per frame */
+    struct SwsContext *sws;
+    uint8_t *tmp_yuv;
+    int tmp_size;
 
     /* Background worker thread & packet queue */
     pthread_t worker_thread;
@@ -58,6 +68,7 @@ typedef struct VideoTestSrcContext {
 static const AVOption zstr_videotestsrc_options[] = {
     { "video_size", "Frame size (e.g. 1920x1080, hd720)", OFFSET(video_size), AV_OPT_TYPE_STRING, { .str = "1280x720" }, 0, 0, DEC },
     { "framerate",  "Video framerate",                    OFFSET(framerate),  AV_OPT_TYPE_STRING, { .str = "30" },       0, 0, DEC },
+    { "pixel_format", "Output pixel format (yuv420p/i420, nv12, nv16, yuyv422, rgb24, bgr24, rgba, bgra)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuv420p" }, 0, 0, DEC },
     { "pattern",    "Test pattern",                        OFFSET(pattern),    AV_OPT_TYPE_INT,    { .i64 = PATTERN_BARS }, 0, 4, DEC, "pattern" },
         { "bars",         "SMPTE color bars",    0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_BARS },         0, 0, DEC, "pattern" },
         { "gradient",     "Horizontal gradient", 0, AV_OPT_TYPE_CONST, { .i64 = PATTERN_GRADIENT },     0, 0, DEC, "pattern" },
@@ -200,7 +211,23 @@ static void* videotestsrc_worker(void *arg) {
             break;
         }
 
-        render_frame_yuv420p(ctx, pkt->data);
+        if (ctx->pix_fmt != AV_PIX_FMT_YUV420P && ctx->sws && ctx->tmp_yuv) {
+            /* Master is YUV420P in tmp; convert into the packet buffer */
+            render_frame_yuv420p(ctx, ctx->tmp_yuv);
+            int w = ctx->width, h = ctx->height;
+            const uint8_t *src[4] = {
+                ctx->tmp_yuv, ctx->tmp_yuv + w * h,
+                ctx->tmp_yuv + w * h * 5 / 4, NULL
+            };
+            int src_ls[4] = { w, w / 2, w / 2, 0 };
+            uint8_t *dst[4] = { NULL };
+            int dst_ls[4] = { 0 };
+            av_image_fill_arrays(dst, dst_ls, pkt->data,
+                                 ctx->pix_fmt, w, h, 1);
+            sws_scale(ctx->sws, src, src_ls, 0, h, dst, dst_ls);
+        } else {
+            render_frame_yuv420p(ctx, pkt->data);
+        }
         pkt->pts = frame_count;
         pkt->dts = frame_count;
         pkt->stream_index = 0;
@@ -230,7 +257,30 @@ static int videotestsrc_read_header(AVFormatContext *s) {
         return AVERROR(EINVAL);
     }
 
-    ctx->frame_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, ctx->width, ctx->height, 1);
+    /* Output pixel format: I420 is an alias of YUV420P */
+    const char *pf = ctx->pixel_format ? ctx->pixel_format : "yuv420p";
+    if (strcmp(pf, "yuv420p") == 0 || strcmp(pf, "i420") == 0 || strcmp(pf, "I420") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    else if (strcmp(pf, "nv12") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_NV12;
+    else if (strcmp(pf, "nv16") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_NV16;
+    else if (strcmp(pf, "yuyv422") == 0 || strcmp(pf, "yuyv") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_YUYV422;
+    else if (strcmp(pf, "rgb24") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_RGB24;
+    else if (strcmp(pf, "bgr24") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_BGR24;
+    else if (strcmp(pf, "rgba") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_RGBA;
+    else if (strcmp(pf, "bgra") == 0)
+        ctx->pix_fmt = AV_PIX_FMT_BGRA;
+    else {
+        av_log(s, AV_LOG_WARNING, "Unknown pixel_format '%s', using yuv420p\n", pf);
+        ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    }
+
+    ctx->frame_size = av_image_get_buffer_size(ctx->pix_fmt, ctx->width, ctx->height, 1);
     if (ctx->frame_size < 0) return ctx->frame_size;
 
     AVStream *st = avformat_new_stream(s, NULL);
@@ -240,8 +290,19 @@ static int videotestsrc_read_header(AVFormatContext *s) {
     st->codecpar->codec_id   = AV_CODEC_ID_RAWVIDEO;
     st->codecpar->width      = ctx->width;
     st->codecpar->height     = ctx->height;
-    st->codecpar->format     = AV_PIX_FMT_YUV420P;
+    st->codecpar->format     = ctx->pix_fmt;
     st->time_base            = av_inv_q(ctx->frame_rate);
+
+    if (ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
+        ctx->tmp_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P,
+                                                 ctx->width, ctx->height, 1);
+        ctx->tmp_yuv = av_malloc(ctx->tmp_size);
+        if (!ctx->tmp_yuv) return AVERROR(ENOMEM);
+        ctx->sws = sws_getContext(ctx->width, ctx->height, AV_PIX_FMT_YUV420P,
+                                  ctx->width, ctx->height, ctx->pix_fmt,
+                                  SWS_BILINEAR, NULL, NULL, NULL);
+        if (!ctx->sws) return AVERROR(ENOMEM);
+    }
 
     pthread_mutex_init(&ctx->lock, NULL);
     pthread_cond_init(&ctx->cond_not_empty, NULL);
@@ -310,6 +371,13 @@ static int videotestsrc_read_close(AVFormatContext *s) {
     pthread_mutex_destroy(&ctx->lock);
     pthread_cond_destroy(&ctx->cond_not_empty);
     pthread_cond_destroy(&ctx->cond_not_full);
+
+    if (ctx->sws) {
+        sws_freeContext(ctx->sws);
+        ctx->sws = NULL;
+    }
+    av_freep(&ctx->tmp_yuv);
+    ctx->tmp_size = 0;
     return 0;
 }
 

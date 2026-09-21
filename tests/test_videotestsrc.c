@@ -93,6 +93,53 @@ static void test_videotestsrc_timing(void) {
     printf("[PASS] zstr_videotestsrc real-time clock pacing passed.\n");
 }
 
+static void test_videotestsrc_pixel_formats(void) {
+    printf("[TEST] Testing zstr_videotestsrc pixel_format matrix...\n");
+
+    struct { const char *name; int fmt; int size; } cases[] = {
+        { "yuv420p", AV_PIX_FMT_YUV420P, 320 * 240 * 3 / 2 },
+        { "i420",    AV_PIX_FMT_YUV420P, 320 * 240 * 3 / 2 },
+        { "nv12",    AV_PIX_FMT_NV12,    320 * 240 * 3 / 2 },
+        { "nv16",    AV_PIX_FMT_NV16,    320 * 240 * 2 },
+        { "yuyv422", AV_PIX_FMT_YUYV422, 320 * 240 * 2 },
+        { "rgb24",   AV_PIX_FMT_RGB24,   320 * 240 * 3 },
+        { "bgr24",   AV_PIX_FMT_BGR24,   320 * 240 * 3 },
+        { "rgba",    AV_PIX_FMT_RGBA,    320 * 240 * 4 },
+        { "bgra",    AV_PIX_FMT_BGRA,    320 * 240 * 4 },
+    };
+
+    const AVInputFormat *iformat = zff_find_input_format("zstr_videotestsrc");
+    assert(iformat != NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AVFormatContext *fmt_ctx = NULL;
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "video_size", "320x240", 0);
+        av_dict_set(&opts, "framerate", "30", 0);
+        av_dict_set(&opts, "pattern", "bars", 0);
+        av_dict_set(&opts, "pixel_format", cases[i].name, 0);
+        av_dict_set(&opts, "realtime", "0", 0);
+        av_dict_set(&opts, "num_frames", "2", 0);
+
+        int ret = avformat_open_input(&fmt_ctx, "dummy", iformat, &opts);
+        assert(ret == 0);
+        assert(fmt_ctx->streams[0]->codecpar->format == cases[i].fmt);
+
+        AVPacket *pkt = av_packet_alloc();
+        int frames = 0;
+        while (av_read_frame(fmt_ctx, pkt) >= 0) {
+            assert(pkt->size == cases[i].size);
+            frames++;
+            av_packet_unref(pkt);
+        }
+        assert(frames == 2);
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt_ctx);
+        av_dict_free(&opts);
+    }
+    printf("[PASS] Pixel format matrix passed (10 formats).\n");
+}
+
 int main(void) {
     printf("====================================================\n");
     printf("   Running zstr_videotestsrc (AVInputFormat) Tests  \n");
@@ -104,6 +151,7 @@ int main(void) {
 
     test_videotestsrc_patterns();
     test_videotestsrc_timing();
+    test_videotestsrc_pixel_formats();
 
     printf("====================================================\n");
     printf("   All zstr_videotestsrc Tests Passed Successfully! \n");

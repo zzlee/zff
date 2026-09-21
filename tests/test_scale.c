@@ -10,6 +10,15 @@
 #include <libavutil/imgutils.h>
 
 #include "zff/plugins/zstr_scale.h"
+
+/* CHECK: always evaluated (assert() is compiled out under NDEBUG/Release) */
+#define CHECK(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        fflush(stderr); \
+        abort(); \
+    } \
+} while (0)
 #include "zff/zff_core.h"
 #include "zff/zff_time.h"
 
@@ -51,14 +60,14 @@ static void test_scale_downscale_and_alignment(void) {
 
     int ret = zstr_scale_process(s, in, out);
     assert(ret == 0);
-    assert(out->width == 640);
-    assert(out->height == 360);
-    assert(out->format == AV_PIX_FMT_YUV420P);
-    assert(out->pts == 100);
+    CHECK(out->width == 640);
+    CHECK(out->height == 360);
+    CHECK(out->format == AV_PIX_FMT_YUV420P);
+    CHECK(out->pts == 100);
 
     /* Verify 64-byte alignment */
-    assert(out->linesize[0] % 64 == 0);
-    assert((uintptr_t)out->data[0] % 64 == 0);
+    CHECK(out->linesize[0] % 64 == 0);
+    CHECK((uintptr_t)out->data[0] % 64 == 0);
 
     av_frame_free(&in);
     av_frame_free(&out);
@@ -76,10 +85,10 @@ static void test_scale_format_conversion(void) {
 
     int ret = zstr_scale_process(s, in, out);
     assert(ret == 0);
-    assert(out->width == 320);
-    assert(out->height == 240);
-    assert(out->format == AV_PIX_FMT_RGB24);
-    assert(out->pts == 200);
+    CHECK(out->width == 320);
+    CHECK(out->height == 240);
+    CHECK(out->format == AV_PIX_FMT_RGB24);
+    CHECK(out->pts == 200);
 
     av_frame_free(&in);
     av_frame_free(&out);
@@ -97,13 +106,13 @@ static void test_scale_passthrough(void) {
 
     int ret = zstr_scale_process(s, in, out);
     assert(ret == 0);
-    assert(out->width == 640);
-    assert(out->height == 480);
-    assert(out->format == AV_PIX_FMT_YUV420P);
+    CHECK(out->width == 640);
+    CHECK(out->height == 480);
+    CHECK(out->format == AV_PIX_FMT_YUV420P);
 
     /* Zero-copy check: both frames share the same underlying AVBufferRef */
     assert(out->buf[0] != NULL && in->buf[0] != NULL);
-    assert(out->buf[0]->buffer == in->buf[0]->buffer);
+    CHECK(out->buf[0]->buffer == in->buf[0]->buffer);
 
     av_frame_free(&in);
     av_frame_free(&out);
@@ -120,16 +129,16 @@ static void test_scale_dynamic_reconfiguration(void) {
     AVFrame *out1 = av_frame_alloc();
     int ret = zstr_scale_process(s, in1, out1);
     assert(ret == 0);
-    assert(out1->width == 320 && out1->height == 240);
+    CHECK(out1->width == 320 && out1->height == 240);
 
     /* Dynamically change input resolution and format to NV12 */
     AVFrame *in2 = create_test_frame(720, 480, AV_PIX_FMT_NV12, 2);
     AVFrame *out2 = av_frame_alloc();
     ret = zstr_scale_process(s, in2, out2);
     assert(ret == 0);
-    assert(out2->width == 320 && out2->height == 240);
-    assert(out2->format == AV_PIX_FMT_YUV420P);
-    assert(out2->pts == 2);
+    CHECK(out2->width == 320 && out2->height == 240);
+    CHECK(out2->format == AV_PIX_FMT_YUV420P);
+    CHECK(out2->pts == 2);
 
     av_frame_free(&in1);
     av_frame_free(&out1);
@@ -162,12 +171,54 @@ static void test_scale_side_data_propagation(void) {
     zff_ptp_time_t extracted_ptp = {0};
     ret = zff_frame_get_ptp(out, &extracted_ptp);
     assert(ret == 0);
-    assert(extracted_ptp.tai_nanoseconds == original_ptp.tai_nanoseconds);
+    CHECK(extracted_ptp.tai_nanoseconds == original_ptp.tai_nanoseconds);
 
     av_frame_free(&in);
     av_frame_free(&out);
     zstr_scale_free(&s);
     printf("  -> OK\n");
+}
+
+static void test_scale_color_range_preserved(void) {
+    printf("[TEST] Full-range YUV420P -> RGB24 keeps levels (no limited remap)...\n");
+    zstr_scale_t *s = zstr_scale_alloc("w=64:h=64:format=rgb24");
+    assert(s != NULL);
+
+    /* Mid-gray Y=180: full-range -> R~180; misread-as-limited -> R~190 */
+    AVFrame *in = av_frame_alloc();
+    in->width = 64; in->height = 64; in->format = AV_PIX_FMT_YUV420P;
+    in->color_range = AVCOL_RANGE_JPEG;
+    CHECK(av_frame_get_buffer(in, 32) >= 0);
+    memset(in->data[0], 180, 64 * 64);
+    memset(in->data[1], 128, 32 * 32);
+    memset(in->data[2], 128, 32 * 32);
+
+    AVFrame *out = av_frame_alloc();
+    int ret = zstr_scale_process(s, in, out);
+    CHECK(ret == 0);
+    CHECK(out->format == AV_PIX_FMT_RGB24);
+    int r = out->data[0][3000];
+    CHECK(r >= 175 && r <= 185);
+
+    /* Limited-range input is unaffected (R~190 expected) */
+    AVFrame *in2 = av_frame_alloc();
+    in2->width = 64; in2->height = 64; in2->format = AV_PIX_FMT_YUV420P;
+    in2->color_range = AVCOL_RANGE_MPEG;
+    CHECK(av_frame_get_buffer(in2, 32) >= 0);
+    memset(in2->data[0], 180, 64 * 64);
+    memset(in2->data[1], 128, 32 * 32);
+    memset(in2->data[2], 128, 32 * 32);
+    AVFrame *out2 = av_frame_alloc();
+    CHECK(zstr_scale_process(s, in2, out2) == 0);
+    int r2 = out2->data[0][3000];
+    CHECK(r2 >= 185 && r2 <= 195);
+
+    av_frame_free(&in);
+    av_frame_free(&out);
+    av_frame_free(&in2);
+    av_frame_free(&out2);
+    zstr_scale_free(&s);
+    printf("  -> OK (full=%d limited=%d)\n", r, r2);
 }
 
 int main(void) {
@@ -177,6 +228,7 @@ int main(void) {
     test_scale_passthrough();
     test_scale_dynamic_reconfiguration();
     test_scale_side_data_propagation();
+    test_scale_color_range_preserved();
     printf("=== All zstr_scale Tests PASSED ===\n");
     return 0;
 }

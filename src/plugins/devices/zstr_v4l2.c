@@ -76,7 +76,7 @@ static const AVOption zstr_v4l2_options[] = {
     { "device",       "V4L2 device node (e.g. /dev/video0)",   OFFSET(device),       AV_OPT_TYPE_STRING, { .str = "/dev/video0" }, 0, 0, DEC },
     { "video_size",   "Capture frame dimensions",              OFFSET(video_size),   AV_OPT_TYPE_STRING, { .str = "640x480" },     0, 0, DEC },
     { "framerate",    "Capture framerate",                     OFFSET(framerate),    AV_OPT_TYPE_STRING, { .str = "30" },          0, 0, DEC },
-    { "pixel_format", "Pixel format (yuyv422, yuv420p, nv12)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuyv422" },     0, 0, DEC },
+    { "pixel_format", "Pixel format (yuyv422, yuv420p/i420, nv12, nv16, rgb24, bgr24, rgb32, bgr32)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuyv422" },     0, 0, DEC },
     { "memory_type",  "Memory mode (mmap, dmabuf, mmap-export)", OFFSET(memory_type), AV_OPT_TYPE_STRING, { .str = "mmap" },        0, 0, DEC },
     { "is_mock",      "Force synthetic mock fallback",         OFFSET(is_mock),      AV_OPT_TYPE_BOOL,   { .i64 = 0 },             0, 1, DEC },
     { "realtime",     "Real-time clock pacing (1=on, 0=burst)",OFFSET(realtime),     AV_OPT_TYPE_BOOL,   { .i64 = 1 },             0, 1, DEC },
@@ -115,8 +115,41 @@ static void render_mock_pattern(V4L2DeviceContext *ctx, uint8_t *data, int frame
             memset(y_plane + y * w, (y + frame_idx * 2) & 0xFF, w);
         }
         memset(uv_plane, 128, w * (h / 2));
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_NV16) {
+        /* NV16: like NV12 but full-height interleaved UV */
+        uint8_t *y_plane = data;
+        uint8_t *uv_plane = data + w * h;
+        for (int y = 0; y < h; y++) {
+            memset(y_plane + y * w, (y + frame_idx * 2) & 0xFF, w);
+        }
+        memset(uv_plane, 128, w * h);
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_RGB24 ||
+               ctx->av_pix_fmt == AV_PIX_FMT_BGR24) {
+        /* Packed 24-bit RGB/BGR: gray ramp */
+        for (int y = 0; y < h; y++) {
+            uint8_t *row = data + y * (w * 3);
+            uint8_t v = (y + frame_idx * 2) & 0xFF;
+            for (int x = 0; x < w; x++) {
+                row[x * 3 + 0] = v;
+                row[x * 3 + 1] = v;
+                row[x * 3 + 2] = v;
+            }
+        }
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_BGR0 ||
+               ctx->av_pix_fmt == AV_PIX_FMT_0RGB) {
+        /* Packed 32-bit XRGB/XBGR: gray ramp + opaque pad byte */
+        for (int y = 0; y < h; y++) {
+            uint8_t *row = data + y * (w * 4);
+            uint8_t v = (y + frame_idx * 2) & 0xFF;
+            for (int x = 0; x < w; x++) {
+                row[x * 4 + 0] = v;
+                row[x * 4 + 1] = v;
+                row[x * 4 + 2] = v;
+                row[x * 4 + 3] = 255;
+            }
+        }
     } else {
-        /* YUV420P fallback */
+        /* YUV420P fallback (I420 is byte-identical) */
         uint8_t *y_plane = data;
         uint8_t *u_plane = data + w * h;
         uint8_t *v_plane = u_plane + (w * h / 4);
@@ -400,6 +433,21 @@ static int v4l2_read_header(AVFormatContext *s) {
     } else if (strcmp(ctx->pixel_format, "nv12") == 0) {
         ctx->av_pix_fmt = AV_PIX_FMT_NV12;
         ctx->v4l2_pix_fmt = V4L2_PIX_FMT_NV12;
+    } else if (strcmp(ctx->pixel_format, "nv16") == 0) {
+        ctx->av_pix_fmt = AV_PIX_FMT_NV16;
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_NV16;
+    } else if (strcmp(ctx->pixel_format, "rgb24") == 0) {
+        ctx->av_pix_fmt = AV_PIX_FMT_RGB24;
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_RGB24;
+    } else if (strcmp(ctx->pixel_format, "bgr24") == 0) {
+        ctx->av_pix_fmt = AV_PIX_FMT_BGR24;
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_BGR24;
+    } else if (strcmp(ctx->pixel_format, "rgb32") == 0) {
+        ctx->av_pix_fmt = AV_PIX_FMT_0RGB;
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_RGB32;
+    } else if (strcmp(ctx->pixel_format, "bgr32") == 0) {
+        ctx->av_pix_fmt = AV_PIX_FMT_BGR0;
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_BGR32;
     } else {
         ctx->av_pix_fmt = AV_PIX_FMT_YUYV422;
         ctx->v4l2_pix_fmt = V4L2_PIX_FMT_YUYV;

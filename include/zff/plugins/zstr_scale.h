@@ -25,7 +25,11 @@ typedef struct zstr_scale zstr_scale_t;
  *                     - h, height: target height (0 = keep input height)
  *                     - format, pix_fmt: target pixel format name (e.g. "yuv420p", "nv12", "rgb24")
  *                     - flags: "bilinear", "bicubic", "fast_bilinear", "neighbor"
- *                     - align: memory stride alignment in bytes (default 64)
+ *                     - align: output stride alignment in bytes, power of 2 (default 64).
+ *                       Kept for downstream HW stride requirements; no measured
+ *                       scaler speedup vs 1/32 on AVX2 (swscale issue, not stride-bound).
+ *                   The input color_range is preserved (full-range content is
+ *                   NOT remapped to limited).
  * @return Allocated instance, or NULL on error.
  */
 zstr_scale_t* zstr_scale_alloc(const char *opt_string);

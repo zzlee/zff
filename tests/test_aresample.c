@@ -5,7 +5,17 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
 #include "zff/plugins/zstr_aresample.h"
+
+/* CHECK: always evaluated (assert() is compiled out under NDEBUG/Release) */
+#define CHECK(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        fflush(stderr); \
+        abort(); \
+    } \
+} while (0)
 
 static AVFrame* alloc_test_audio_frame(int sample_rate, int channels, enum AVSampleFormat fmt, int nb_samples, int64_t pts) {
     AVFrame *frame = av_frame_alloc();
@@ -63,13 +73,13 @@ static void test_dynamic_format_change(void) {
     /* Step 1: Input at 44100 Hz */
     AVFrame *in1 = alloc_test_audio_frame(44100, 2, AV_SAMPLE_FMT_S16, 1024, 0);
     AVFrame *out1 = av_frame_alloc();
-    assert(zstr_aresample_process(resampler, in1, out1) == 0);
+    CHECK(zstr_aresample_process(resampler, in1, out1) == 0);
     assert(out1->sample_rate == 48000);
 
     /* Step 2: Mid-stream input changes dynamically to 32000 Hz, mono (1 ch) */
     AVFrame *in2 = alloc_test_audio_frame(32000, 1, AV_SAMPLE_FMT_S16, 512, 1024);
     AVFrame *out2 = av_frame_alloc();
-    assert(zstr_aresample_process(resampler, in2, out2) == 0);
+    CHECK(zstr_aresample_process(resampler, in2, out2) == 0);
     assert(out2->sample_rate == 48000);
     assert(out2->ch_layout.nb_channels == 2);
 
@@ -93,7 +103,7 @@ static void test_asrc_drift_compensation(void) {
         AVFrame *in = alloc_test_audio_frame(48000, 2, AV_SAMPLE_FMT_S16, 1024, pts);
         AVFrame *out = av_frame_alloc();
 
-        assert(zstr_aresample_process(resampler, in, out) == 0);
+        CHECK(zstr_aresample_process(resampler, in, out) == 0);
         assert(out->sample_rate == 48000);
         assert(out->nb_samples > 0);
 
@@ -108,6 +118,132 @@ static void test_asrc_drift_compensation(void) {
     printf("[PASS] ASRC PTS drift compensation passed.\n");
 }
 
+static void test_flush_drain(void) {
+    printf("[TEST] Testing flush drains filter delay with continuous PTS...\n");
+
+    zstr_aresample_t *resampler = zstr_aresample_alloc("out_sample_rate=48000:out_channels=2:out_sample_fmt=s16");
+    assert(resampler != NULL);
+
+    int64_t pts = 2000000000LL;
+    const int64_t step_ns = 1024LL * 1000000000LL / 44100LL; /* 23219954 ns */
+    int64_t total = 0;
+    int64_t last_pts = 0;
+    int last_nb = 0;
+    for (int i = 0; i < 5; i++) {
+        AVFrame *in = alloc_test_audio_frame(44100, 2, AV_SAMPLE_FMT_S16, 1024, pts);
+        AVFrame *out = av_frame_alloc();
+        CHECK(zstr_aresample_process(resampler, in, out) == 0);
+        CHECK(out->nb_samples > 0);
+        total += out->nb_samples;
+        last_pts = out->pts;
+        last_nb = out->nb_samples;
+        av_frame_free(&in);
+        av_frame_free(&out);
+        pts += step_ns;
+    }
+
+    /* Drain until empty; PTS must continue seamlessly */
+    int64_t flushed = 0;
+    int64_t expect_pts = last_pts + last_nb * 1000000000LL / 48000LL;
+    for (int i = 0; i < 8; i++) {
+        AVFrame *out = av_frame_alloc();
+        CHECK(zstr_aresample_flush(resampler, out) == 0);
+        if (out->nb_samples == 0) {
+            av_frame_free(&out);
+            break;
+        }
+        { int64_t dd = out->pts - expect_pts; if (dd < 0) dd = -dd; CHECK(dd <= 1); }
+        expect_pts += out->nb_samples * 1000000000LL / 48000LL;
+        flushed += out->nb_samples;
+        av_frame_free(&out);
+    }
+    CHECK(flushed > 0); /* filter delay actually existed and was recovered */
+
+    /* Grand total matches the exact ratio (delay fully drained) */
+    int64_t expect_total = 5LL * 1024 * 48000 / 44100;
+    int64_t diff = total + flushed - expect_total;
+    if (diff < 0) diff = -diff;
+    CHECK(diff <= 4);
+
+    zstr_aresample_free(&resampler);
+    printf("[PASS] Flush drain passed (recovered %lld delay samples).\n", (long long)flushed);
+}
+
+static void test_pts_precision(void) {
+    printf("[TEST] Testing output PTS precision and continuity...\n");
+
+    zstr_aresample_t *resampler = zstr_aresample_alloc("out_sample_rate=48000:out_channels=2:out_sample_fmt=s16");
+    assert(resampler != NULL);
+
+    const int64_t anchor = 5000000000LL;
+    const int64_t step_ns = 1024LL * 1000000000LL / 44100LL;
+    int64_t prev_end = 0;
+    for (int i = 0; i < 6; i++) {
+        AVFrame *in = alloc_test_audio_frame(44100, 2, AV_SAMPLE_FMT_S16, 1024, anchor + i * step_ns);
+        AVFrame *out = av_frame_alloc();
+        CHECK(zstr_aresample_process(resampler, in, out) == 0);
+        CHECK(out->nb_samples > 0);
+        if (i == 0) {
+            /* First frame lands within filter-delay distance of the anchor */
+            int64_t d = out->pts - anchor;
+            if (d < 0) d = -d;
+            CHECK(d < 2000000LL); /* < 2ms */
+        } else {
+            /* continuity up to rounding (av_rescale rounds to nearest) */
+            int64_t dd = out->pts - prev_end;
+            if (dd < 0) dd = -dd;
+            CHECK(dd <= 1);
+        }
+        prev_end = out->pts + out->nb_samples * 1000000000LL / 48000LL;
+        av_frame_free(&in);
+        av_frame_free(&out);
+    }
+
+    zstr_aresample_free(&resampler);
+    printf("[PASS] PTS precision passed.\n");
+}
+
+static void test_fractional_rate(void) {
+    printf("[TEST] Testing fractional rate override 44100 -> 24000.5 Hz...\n");
+
+    /* numer/denom = 48001/2 -> 24000.5 Hz; swr runs at rounded 24001 Hz,
+     * compensation trims the exact ratio. 1000 frames separate compensated
+     * output (~557330) from uncompensated (~557353) well beyond noise. */
+    zstr_aresample_t *resampler = zstr_aresample_alloc(
+        "out_sample_rate=24000:out_channels=1:out_sample_fmt=s16:rate_numer=48001:rate_denom=2");
+    assert(resampler != NULL);
+
+    int64_t total = 0;
+    int64_t pts = 1000000000LL;
+    const int frames = 1000;
+    for (int i = 0; i < frames; i++) {
+        AVFrame *in = alloc_test_audio_frame(44100, 1, AV_SAMPLE_FMT_S16, 1024, pts);
+        AVFrame *out = av_frame_alloc();
+        CHECK(zstr_aresample_process(resampler, in, out) == 0);
+        total += out->nb_samples;
+        av_frame_free(&in);
+        av_frame_free(&out);
+        pts += 1024LL * 1000000000LL / 44100LL;
+    }
+    for (int i = 0; i < 8; i++) {
+        AVFrame *out = av_frame_alloc();
+        CHECK(zstr_aresample_flush(resampler, out) == 0);
+        total += out->nb_samples;
+        int done = (out->nb_samples == 0);
+        av_frame_free(&out);
+        if (done) break;
+    }
+
+    int64_t expect = (int64_t)frames * 1024 * 48001 / 2 / 44100; /* 557329 */
+    int64_t diff = total - expect;
+    if (diff < 0) diff = -diff;
+    CHECK(diff <= 8);
+
+    zstr_aresample_free(&resampler);
+    printf("[PASS] Fractional rate passed (total %lld, expected %lld).\n",
+           (long long)total, (long long)expect);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("   Running zstr_aresample Unit Tests    \n");
@@ -116,6 +252,9 @@ int main(void) {
     test_resampling_basic();
     test_dynamic_format_change();
     test_asrc_drift_compensation();
+    test_flush_drain();
+    test_pts_precision();
+    test_fractional_rate();
 
     printf("========================================\n");
     printf("   All zstr_aresample Tests Passed!     \n");

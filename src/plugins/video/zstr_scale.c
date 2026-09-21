@@ -9,6 +9,7 @@
 #include <libavutil/pixdesc.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
+#include <libavutil/opt.h>
 
 struct zstr_scale {
     int target_width;
@@ -118,14 +119,28 @@ int zstr_scale_process(zstr_scale_t *s, const AVFrame *in, AVFrame *out) {
             s->sws_ctx = NULL;
         }
 
-        s->sws_ctx = sws_getContext(
-            in->width, in->height, in->format,
-            dst_w, dst_h, dst_fmt,
-            s->flags, NULL, NULL, NULL
-        );
-
+        s->sws_ctx = sws_alloc_context();
         if (!s->sws_ctx) {
             return AVERROR(ENOMEM);
+        }
+        av_opt_set_int(s->sws_ctx, "srcw", in->width, 0);
+        av_opt_set_int(s->sws_ctx, "srch", in->height, 0);
+        av_opt_set_int(s->sws_ctx, "src_format", in->format, 0);
+        av_opt_set_int(s->sws_ctx, "dstw", dst_w, 0);
+        av_opt_set_int(s->sws_ctx, "dsth", dst_h, 0);
+        av_opt_set_int(s->sws_ctx, "dst_format", dst_fmt, 0);
+        av_opt_set_int(s->sws_ctx, "sws_flags", s->flags, 0);
+        /* Preserve the input color range: sws_getContext() silently assumes
+         * limited range, which lifts full-range (JPEG) content by ~10 levels
+         * on YUV->RGB conversion. dst follows src (no level remapping). */
+        int range = (in->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+        av_opt_set_int(s->sws_ctx, "src_range", range, 0);
+        av_opt_set_int(s->sws_ctx, "dst_range", range, 0);
+
+        if (sws_init_context(s->sws_ctx, NULL, NULL) < 0) {
+            sws_freeContext(s->sws_ctx);
+            s->sws_ctx = NULL;
+            return AVERROR(EINVAL);
         }
 
         s->cur_in_w = in->width;

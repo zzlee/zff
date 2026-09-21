@@ -99,6 +99,52 @@ static void test_v4l2_dmabuf_mode(void) {
     printf("[PASS] zstr_v4l2 mmap-export mode passed.\n");
 }
 
+static void test_v4l2_pixel_format_matrix(void) {
+    printf("[TEST] Testing zstr_v4l2 mock capture across pixel formats...\n");
+
+    struct { const char *name; int fmt; int size; } cases[] = {
+        { "yuyv422", AV_PIX_FMT_YUYV422, 320 * 240 * 2 },
+        { "yuv420p", AV_PIX_FMT_YUV420P, 320 * 240 * 3 / 2 },
+        { "nv12",    AV_PIX_FMT_NV12,    320 * 240 * 3 / 2 },
+        { "nv16",    AV_PIX_FMT_NV16,    320 * 240 * 2 },
+        { "rgb24",   AV_PIX_FMT_RGB24,   320 * 240 * 3 },
+        { "bgr24",   AV_PIX_FMT_BGR24,   320 * 240 * 3 },
+        { "rgb32",   AV_PIX_FMT_0RGB,    320 * 240 * 4 },
+        { "bgr32",   AV_PIX_FMT_BGR0,    320 * 240 * 4 },
+    };
+
+    const AVInputFormat *iformat = zff_find_input_format("zstr_v4l2");
+    assert(iformat != NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AVFormatContext *fmt_ctx = NULL;
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "video_size", "320x240", 0);
+        av_dict_set(&opts, "framerate", "30", 0);
+        av_dict_set(&opts, "pixel_format", cases[i].name, 0);
+        av_dict_set(&opts, "is_mock", "1", 0);
+        av_dict_set(&opts, "realtime", "0", 0);
+        av_dict_set(&opts, "num_frames", "2", 0);
+
+        int ret = avformat_open_input(&fmt_ctx, "v4l2_mock", iformat, &opts);
+        assert(ret == 0);
+        assert(fmt_ctx->streams[0]->codecpar->format == cases[i].fmt);
+
+        AVPacket *pkt = av_packet_alloc();
+        int frames = 0;
+        while (av_read_frame(fmt_ctx, pkt) >= 0) {
+            assert(pkt->size == cases[i].size);
+            frames++;
+            av_packet_unref(pkt);
+        }
+        assert(frames == 2);
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt_ctx);
+        av_dict_free(&opts);
+    }
+    printf("[PASS] Pixel format matrix passed (9 formats).\n");
+}
+
 int main(void) {
     printf("====================================================\n");
     printf("        Running zstr_v4l2 (AVInputFormat) Tests     \n");
@@ -110,6 +156,7 @@ int main(void) {
 
     test_v4l2_mock_capture();
     test_v4l2_dmabuf_mode();
+    test_v4l2_pixel_format_matrix();
 
     printf("====================================================\n");
     printf("     All zstr_v4l2 Tests Passed Successfully!       \n");

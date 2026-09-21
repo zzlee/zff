@@ -3,11 +3,13 @@
 =============================================================================*/
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 #include "zff/zff_core.h"
 #include "zff/plugins/zstr_glsink.h"
 #include "zff/plugins/zstr_videotestsrc.h"
 #include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
 
 static void test_glsink_mock_mode(void) {
     printf("[TEST] Testing zstr_glsink in null/mock mode via standard av_write_frame()...\n");
@@ -122,6 +124,52 @@ static void test_loopback_videotestsrc_to_glsink(void) {
     printf("[PASS] End-to-end loopback passed (8 frames rendered).\n");
 }
 
+static void test_glsink_format_matrix_null(void) {
+    printf("[TEST] zstr_glsink null-mode write across pixel formats (no crash)...\n");
+
+    int fmts[] = {
+        AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12,
+        AV_PIX_FMT_NV16, AV_PIX_FMT_YUYV422, AV_PIX_FMT_RGB24,
+        AV_PIX_FMT_BGR24, AV_PIX_FMT_RGBA, AV_PIX_FMT_BGRA,
+    };
+
+    const AVOutputFormat *oformat = zff_find_output_format("zstr_glsink");
+    assert(oformat != NULL);
+
+    for (size_t i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+        AVFormatContext *out_ctx = NULL;
+        int ret = avformat_alloc_output_context2(&out_ctx, oformat, NULL, "display");
+        assert(ret == 0);
+
+        AVStream *st = avformat_new_stream(out_ctx, NULL);
+        assert(st != NULL);
+        st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        st->codecpar->codec_id   = AV_CODEC_ID_RAWVIDEO;
+        st->codecpar->width      = 160;
+        st->codecpar->height     = 120;
+        st->codecpar->format     = fmts[i];
+
+        AVDictionary *out_opts = NULL;
+        av_dict_set(&out_opts, "is_mock", "1", 0);
+        ret = avformat_write_header(out_ctx, &out_opts);
+        assert(ret == 0);
+
+        int sz = av_image_get_buffer_size(fmts[i], 160, 120, 1);
+        AVPacket *pkt = av_packet_alloc();
+        av_new_packet(pkt, sz);
+        memset(pkt->data, 128, sz);
+        pkt->stream_index = 0;
+        ret = av_write_frame(out_ctx, pkt);
+        assert(ret == 0);
+
+        av_packet_free(&pkt);
+        av_write_trailer(out_ctx);
+        avformat_free_context(out_ctx);
+        av_dict_free(&out_opts);
+    }
+    printf("[PASS] Null-mode format matrix passed (9 formats).\n");
+}
+
 int main(void) {
     printf("====================================================\n");
     printf("     Running zstr_glsink (AVOutputFormat) Tests     \n");
@@ -133,6 +181,7 @@ int main(void) {
 
     test_glsink_mock_mode();
     test_loopback_videotestsrc_to_glsink();
+    test_glsink_format_matrix_null();
 
     printf("====================================================\n");
     printf("    All zstr_glsink Tests Passed Successfully!      \n");

@@ -64,6 +64,12 @@ int zstr_rtp_payloader_process(zstr_rtp_payloader_t *s,
 void zstr_rtp_payloader_free_packets(AVPacket **pkts, int count);
 void zstr_rtp_payloader_free(zstr_rtp_payloader_t **s);
 
+/**
+ * Return the next RTP sequence number (i.e. the seq the next produced
+ * packet will carry). Useful for RTSP RTP-Info headers.
+ */
+uint16_t zstr_rtp_payloader_seq(const zstr_rtp_payloader_t *s);
+
 /* ---------------------------------------------------------------------------
  * RTP Depayloader API
  * --------------------------------------------------------------------------- */

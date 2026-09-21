@@ -47,7 +47,7 @@ typedef struct V4L2SinkContext {
 
 static const AVOption zstr_v4l2_sink_options[] = {
     { "device",       "V4L2 output device (e.g. /dev/video1)", OFFSET(device),       AV_OPT_TYPE_STRING, { .str = "/dev/video1" }, 0, 0, ENC },
-    { "pixel_format", "Pixel format (yuyv422, yuv420p, nv12)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuyv422" },     0, 0, ENC },
+    { "pixel_format", "Pixel format (yuyv422, yuv420p, nv12, nv16, rgb24, bgr24, rgb32, bgr32)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuyv422" },     0, 0, ENC },
     { "is_mock",      "Force synthetic mock sink",             OFFSET(is_mock),      AV_OPT_TYPE_BOOL,   { .i64 = 0 },             0, 1, ENC },
     { NULL }
 };
@@ -70,12 +70,62 @@ static int v4l2_sink_write_header(AVFormatContext *s) {
     AVCodecParameters *par = s->streams[0]->codecpar;
     ctx->width = par->width > 0 ? par->width : 640;
     ctx->height = par->height > 0 ? par->height : 480;
-    ctx->av_pix_fmt = par->format != AV_PIX_FMT_NONE ? par->format : AV_PIX_FMT_YUYV422;
+    /* The sink memcpys packet bytes straight into V4L2 buffers (no sws),
+     * so the stream format must be natively supported. AV_PIX_FMT_NONE
+     * falls back to the pixel_format option. */
+    if (par->format == AV_PIX_FMT_NONE) {
+        const char *pf = ctx->pixel_format ? ctx->pixel_format : "yuyv422";
+        if (strcmp(pf, "yuv420p") == 0 || strcmp(pf, "I420") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_YUV420P;
+        else if (strcmp(pf, "nv12") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_NV12;
+        else if (strcmp(pf, "nv16") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_NV16;
+        else if (strcmp(pf, "rgb24") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_RGB24;
+        else if (strcmp(pf, "bgr24") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_BGR24;
+        else if (strcmp(pf, "rgb32") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_0RGB;
+        else if (strcmp(pf, "bgr32") == 0)
+            ctx->av_pix_fmt = AV_PIX_FMT_BGR0;
+        else
+            ctx->av_pix_fmt = AV_PIX_FMT_YUYV422;
+    } else {
+        switch ((enum AVPixelFormat)par->format) {
+            case AV_PIX_FMT_YUV420P:
+            case AV_PIX_FMT_NV12:
+            case AV_PIX_FMT_NV16:
+            case AV_PIX_FMT_YUYV422:
+            case AV_PIX_FMT_RGB24:
+            case AV_PIX_FMT_BGR24:
+            case AV_PIX_FMT_0RGB:
+            case AV_PIX_FMT_BGR0:
+                ctx->av_pix_fmt = par->format;
+                break;
+            default:
+                av_log(s, AV_LOG_ERROR,
+                       "zstr_v4l2_sink: unsupported stream format %s "
+                       "(insert zstr_scale or pick yuyv422/yuv420p/nv12/nv16/rgb24/bgr24/rgb32/bgr32)\n",
+                       av_get_pix_fmt_name(par->format));
+                return AVERROR(EINVAL);
+        }
+    }
 
     if (ctx->av_pix_fmt == AV_PIX_FMT_YUV420P) {
         ctx->v4l2_pix_fmt = V4L2_PIX_FMT_YUV420;
     } else if (ctx->av_pix_fmt == AV_PIX_FMT_NV12) {
         ctx->v4l2_pix_fmt = V4L2_PIX_FMT_NV12;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_NV16) {
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_NV16;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_RGB24) {
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_RGB24;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_BGR24) {
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_BGR24;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_0RGB) {
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_RGB32;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_BGR0) {
+        ctx->v4l2_pix_fmt = V4L2_PIX_FMT_BGR32;
     } else {
         ctx->v4l2_pix_fmt = V4L2_PIX_FMT_YUYV;
     }

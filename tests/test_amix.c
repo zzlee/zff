@@ -15,6 +15,26 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* CHECK: always evaluated (assert() is compiled out under NDEBUG/Release) */
+#define CHECK(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        fflush(stderr); \
+        abort(); \
+    } \
+} while (0)
+
+static float frame_peak(const AVFrame *f) {
+    const float *data = (const float *)f->data[0];
+    int n = f->nb_samples * f->ch_layout.nb_channels;
+    float peak = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float a = fabsf(data[i]);
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
 static AVFrame* create_audio_frame(int rate, int channels, enum AVSampleFormat fmt, int nb_samples, double freq, double amp) {
     AVFrame *frame = av_frame_alloc();
     assert(frame != NULL);
@@ -73,9 +93,9 @@ static void test_amix_basic_mixing(void) {
     for (int i = 0; i < 512 * 2; i++) {
         float abs_v = fabsf(data[i]);
         if (abs_v > max_val) max_val = abs_v;
-        assert(data[i] <= 1.0f && data[i] >= -1.0f);
+        CHECK(data[i] <= 1.0f && data[i] >= -1.0f);
     }
-    assert(max_val > 0.3f); /* Confirms signals actually summed */
+    CHECK(max_val > 0.3f); /* Confirms signals actually summed */
 
     av_frame_free(&f1);
     av_frame_free(&f2);
@@ -92,7 +112,7 @@ static void test_amix_mute_and_volume(void) {
     assert(m != NULL);
 
     /* Mute input 0, set input 1 volume to 0.5 via unified zstr_amix_set_param */
-    assert(zstr_amix_set_param(m, "mute@0=1:volume@1=0.5") == 0);
+    CHECK(zstr_amix_set_param(m, "mute@0=1:volume@1=0.5") == 0);
 
     AVFrame *f1 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 1.0);
     AVFrame *f2 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 880.0, 1.0);
@@ -111,8 +131,8 @@ static void test_amix_mute_and_volume(void) {
         float abs_v = fabsf(data[i]);
         if (abs_v > max_val) max_val = abs_v;
     }
-    assert(max_val <= 0.51f);
-    assert(max_val >= 0.45f);
+    CHECK(max_val <= 0.51f);
+    CHECK(max_val >= 0.45f);
 
     av_frame_free(&f1);
     av_frame_free(&f2);
@@ -169,7 +189,7 @@ static void test_amix_soft_clipping_limiter(void) {
     const float *data = (const float *)out->data[0];
     for (int i = 0; i < 256 * 2; i++) {
         /* Verify soft-clipping smoothly bounded output within [-1.0, 1.0] without wrap-around */
-        assert(data[i] <= 1.0001f && data[i] >= -1.0001f);
+        CHECK(data[i] <= 1.0001f && data[i] >= -1.0001f);
     }
 
     av_frame_free(&f1);
@@ -178,6 +198,81 @@ static void test_amix_soft_clipping_limiter(void) {
     zstr_amix_free(&m);
 
     printf("[PASS] Soft-clipping limiter passed.\n");
+}
+
+static void test_amix_dropout_transition(void) {
+    printf("[TEST] Testing dropout_transition renormalization ramp...\n");
+
+    zstr_amix_t *m = zstr_amix_alloc(
+        "inputs=2:sample_rate=48000:channels=2:sample_fmt=flt:normalize=1:dropout_transition=0.1");
+    assert(m != NULL);
+
+    /* Coherent sines: steady mix of two amp-0.8 inputs peaks at ~0.8 */
+    AVFrame *f1 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 0.8);
+    AVFrame *f2 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 0.8);
+    const AVFrame *both[2] = { f1, f2 };
+    const AVFrame *dropped[2] = { f1, NULL };
+    AVFrame *out = av_frame_alloc();
+
+    for (int i = 0; i < 3; i++) {
+        CHECK(zstr_amix_process(m, both, 2, out) == 0);
+    }
+    float steady = frame_peak(out);
+    CHECK(steady > 0.75f && steady < 0.85f);
+
+    /* Drop input 1: gain must NOT step immediately */
+    CHECK(zstr_amix_process(m, dropped, 2, out) == 0);
+    float just_dropped = frame_peak(out);
+    CHECK(just_dropped < 0.5f); /* still ~0.4, ramp not yet applied */
+
+    /* Run past the 0.1s transition: gain renormalizes to ~1.0 */
+    for (int i = 0; i < 30; i++) {
+        CHECK(zstr_amix_process(m, dropped, 2, out) == 0);
+    }
+    float ramped = frame_peak(out);
+    CHECK(ramped > 0.75f && ramped < 0.85f);
+
+    /* Re-add: no overshoot above steady, then settle back */
+    CHECK(zstr_amix_process(m, both, 2, out) == 0);
+    CHECK(frame_peak(out) <= 0.9f); /* fade-in dip, no overshoot */
+    for (int i = 0; i < 30; i++) {
+        CHECK(zstr_amix_process(m, both, 2, out) == 0);
+    }
+    float settled = frame_peak(out);
+    CHECK(settled > 0.75f && settled < 0.85f);
+
+    av_frame_free(&f1);
+    av_frame_free(&f2);
+    av_frame_free(&out);
+    zstr_amix_free(&m);
+
+    printf("[PASS] Dropout transition ramp passed.\n");
+}
+
+static void test_amix_dropout_instant(void) {
+    printf("[TEST] Testing dropout_transition=0 instant renormalization...\n");
+
+    zstr_amix_t *m = zstr_amix_alloc(
+        "inputs=2:sample_rate=48000:channels=2:sample_fmt=flt:normalize=1:dropout_transition=0");
+    assert(m != NULL);
+
+    AVFrame *f1 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 0.8);
+    AVFrame *f2 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 0.8);
+    const AVFrame *both[2] = { f1, f2 };
+    const AVFrame *dropped[2] = { f1, NULL };
+    AVFrame *out = av_frame_alloc();
+
+    CHECK(zstr_amix_process(m, both, 2, out) == 0);
+    CHECK(zstr_amix_process(m, dropped, 2, out) == 0);
+    float peak = frame_peak(out);
+    CHECK(peak > 0.75f && peak < 0.85f); /* legacy 1/N applied at once */
+
+    av_frame_free(&f1);
+    av_frame_free(&f2);
+    av_frame_free(&out);
+    zstr_amix_free(&m);
+
+    printf("[PASS] Instant dropout renormalization passed.\n");
 }
 
 int main(void) {
@@ -189,6 +284,8 @@ int main(void) {
     test_amix_mute_and_volume();
     test_amix_resampling_cross_format();
     test_amix_soft_clipping_limiter();
+    test_amix_dropout_transition();
+    test_amix_dropout_instant();
 
     printf("====================================================\n");
     printf("      All zstr_amix Tests Passed Successfully!      \n");

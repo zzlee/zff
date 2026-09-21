@@ -25,7 +25,9 @@ typedef struct zstr_amix zstr_amix_t;
  *                     - sample_rate, rate: output master sample rate (default 48000)
  *                     - channels: output master channels (default 2)
  *                     - sample_fmt, format: output format ("s16", "s32", "flt", default "flt")
- *                     - normalize: 1 = divide by active inputs, 0 = soft-clipping limiter (default 0)
+ *                     - normalize: 1 = adaptive renormalization, 0 = soft-clipping limiter (default 0)
+ *                     - dropout_transition: seconds for renormalization ramp when sources
+ *                       come/go (default 2.0, 0 = instant legacy 1/N)
  *                     - weights: pipe-separated volumes (e.g. "1.0|0.8")
  * @return Allocated instance, or NULL on error.
  */
@@ -38,6 +40,7 @@ zstr_amix_t* zstr_amix_alloc(const char *opt_string);
  *   - "mute@<idx>=<0|1>"   (e.g. "mute@1=1")
  *   - "pan@<idx>=<val>"    (e.g. "pan@0=-0.5")
  *   - "normalize=<0|1>"
+ *   - "dropout_transition=<seconds>" (e.g. "dropout_transition=0.5")
  *
  * Multiple options can be separated by ':' or ','.
  */

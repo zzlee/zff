@@ -120,6 +120,9 @@ int zstr_rtp_depayloader_process(zstr_rtp_depayloader_t *s,
     if (payload_len <= 0) return 0;
 
     save_side_data(s, rtp_pkt);
+    /* New timestamp with pending data means the previous AU never got its
+     * marker (packet loss); drop the stale bytes and resync here. */
+    if (s->au_size > 0 && ts != s->au_ts) s->au_size = 0;
     s->au_ts = ts;
     s->au_pts = rtp_pkt->pts;
     s->au_dts = rtp_pkt->dts;
@@ -152,14 +155,35 @@ int zstr_rtp_depayloader_process(zstr_rtp_depayloader_t *s,
                 *ready = true;
             }
         } else {
-            /* Single NAL Unit */
-            s->au_size = 0;
+            /* Single NAL Unit: accumulate into the current access unit.
+             * The payloader sets the marker bit only on the last RTP packet
+             * of a multi-NAL access unit, so earlier NALs must be kept. */
             append_bytes(s, start_code, 4);
             append_bytes(s, payload, payload_len);
             if (marker) {
                 fill_output_packet(s, out_pkt);
                 *ready = true;
             }
+        }
+        return 0;
+    } else if (s->codec == ZSTR_RTP_CODEC_AAC) {
+        /* RFC 3640 MPEG4-GENERIC simple mode: AU-headers-length (16 bits)
+         * + one AU-header + raw AAC frame. Fall back to raw passthrough for
+         * senders that omit AU headers (pre-RFC3640 generic payloads). */
+        const uint8_t *raw = payload;
+        int raw_len = payload_len;
+        if (payload_len >= 4) {
+            int au_headers_bits = (payload[0] << 8) | payload[1];
+            if (au_headers_bits == 16) {
+                raw = payload + 4;
+                raw_len = payload_len - 4;
+            }
+        }
+        s->au_size = 0;
+        append_bytes(s, raw, raw_len);
+        if (marker) {
+            fill_output_packet(s, out_pkt);
+            *ready = true;
         }
         return 0;
     } else if (s->codec == ZSTR_RTP_CODEC_H265) {
@@ -189,7 +213,7 @@ int zstr_rtp_depayloader_process(zstr_rtp_depayloader_t *s,
                 *ready = true;
             }
         } else {
-            s->au_size = 0;
+            /* Single NAL Unit: accumulate like H.264 (see above). */
             append_bytes(s, start_code, 4);
             append_bytes(s, payload, payload_len);
             if (marker) {

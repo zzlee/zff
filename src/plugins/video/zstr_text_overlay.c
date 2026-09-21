@@ -217,6 +217,41 @@ static void blend_pixel(AVFrame *frame, int x, int y,
             uv_ptr[0] = (uint8_t)((pu * alpha + uv_ptr[0] * (255 - alpha)) / 255);
             uv_ptr[1] = (uint8_t)((pv * alpha + uv_ptr[1] * (255 - alpha)) / 255);
         }
+    } else if (format == AV_PIX_FMT_NV16) {
+        uint8_t py, pu, pv;
+        rgba_to_yuv(r, g, b, &py, &pu, &pv);
+
+        uint8_t *y_ptr = frame->data[0] + y * frame->linesize[0] + x;
+        *y_ptr = (uint8_t)((py * alpha + (*y_ptr) * (255 - alpha)) / 255);
+
+        /* NV16 chroma is full-height: blend UV on even columns every row */
+        if ((x % 2) == 0) {
+            int cx = x & ~1;
+            uint8_t *uv_ptr = frame->data[1] + y * frame->linesize[1] + cx;
+            uv_ptr[0] = (uint8_t)((pu * alpha + uv_ptr[0] * (255 - alpha)) / 255);
+            uv_ptr[1] = (uint8_t)((pv * alpha + uv_ptr[1] * (255 - alpha)) / 255);
+        }
+    } else if (format == AV_PIX_FMT_YUYV422) {
+        uint8_t py, pu, pv;
+        rgba_to_yuv(r, g, b, &py, &pu, &pv);
+
+        /* Packed YUYV macropixel: Y0 U Y1 V */
+        uint8_t *p = frame->data[0] + y * frame->linesize[0] + (x & ~1) * 2;
+        uint8_t *y_ptr = (x % 2 == 0) ? &p[0] : &p[2];
+        *y_ptr = (uint8_t)((py * alpha + (*y_ptr) * (255 - alpha)) / 255);
+        p[1] = (uint8_t)((pu * alpha + p[1] * (255 - alpha)) / 255);
+        p[3] = (uint8_t)((pv * alpha + p[3] * (255 - alpha)) / 255);
+    } else if (format == AV_PIX_FMT_BGR24) {
+        uint8_t *p = frame->data[0] + y * frame->linesize[0] + x * 3;
+        p[0] = (uint8_t)((b * alpha + p[0] * (255 - alpha)) / 255);
+        p[1] = (uint8_t)((g * alpha + p[1] * (255 - alpha)) / 255);
+        p[2] = (uint8_t)((r * alpha + p[2] * (255 - alpha)) / 255);
+    } else if (format == AV_PIX_FMT_BGRA) {
+        uint8_t *p = frame->data[0] + y * frame->linesize[0] + x * 4;
+        p[0] = (uint8_t)((b * alpha + p[0] * (255 - alpha)) / 255);
+        p[1] = (uint8_t)((g * alpha + p[1] * (255 - alpha)) / 255);
+        p[2] = (uint8_t)((r * alpha + p[2] * (255 - alpha)) / 255);
+        p[3] = (uint8_t)(alpha + p[3] * (255 - alpha) / 255);
     }
 }
 
@@ -497,8 +532,12 @@ int zstr_text_overlay_process(zstr_text_overlay_t *s, const AVFrame *in, AVFrame
     /* Validate supported pixel formats */
     if (in->format != AV_PIX_FMT_YUV420P &&
         in->format != AV_PIX_FMT_NV12 &&
+        in->format != AV_PIX_FMT_NV16 &&
+        in->format != AV_PIX_FMT_YUYV422 &&
         in->format != AV_PIX_FMT_RGB24 &&
-        in->format != AV_PIX_FMT_RGBA)
+        in->format != AV_PIX_FMT_BGR24 &&
+        in->format != AV_PIX_FMT_RGBA &&
+        in->format != AV_PIX_FMT_BGRA)
     {
         /* Unsupported pixel format: copy or passthrough */
         if (out != in) {

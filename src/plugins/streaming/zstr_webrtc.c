@@ -14,6 +14,7 @@
 
 #include "zff/plugins/zstr_webrtc.h"
 #include "zff/plugins/zstr_webrtc_twcc.h"
+#include "zff/plugins/zstr_webrtc_sdp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,11 @@ struct zstr_webrtc {
     char *ice_servers[ZSTR_WEBRTC_MAX_ICE];
     int nb_ice_servers;
     bool twcc_enable;
+
+    /* SDP compat */
+    char *codec_pref; /* comma-separated codec preference, NULL = defaults */
+    char selected_video[32];
+    char selected_audio[32];
 
     /* libdatachannel state */
     int pc_id;
@@ -184,13 +190,34 @@ static void on_local_description(int pc, const char *sdp, const char *type, void
     (void)pc;
     zstr_webrtc_t *s = ptr;
     if (!s || !sdp || !type) return;
+    /* Chrome compat: normalize our generated SDP (BUNDLE/rtcp-mux/msid). */
+    char *compat = zstr_sdp_compat_local(sdp);
+    const char *store = compat ? compat : sdp;
+    /* TWCC extmap injection for answers (documents the negotiated extmap;
+     * the SDP is already committed inside libdatachannel). */
+    char *with_twcc = NULL;
+    if (s->twcc && strcmp(type, "answer") == 0) {
+        size_t cap = strlen(store) + 2048;
+        with_twcc = malloc(cap);
+        if (with_twcc) {
+            snprintf(with_twcc, cap, "%s", store);
+            if (zstr_webrtc_twcc_inject_answer(s->twcc, with_twcc, cap) == 0)
+                store = with_twcc;
+            else {
+                free(with_twcc);
+                with_twcc = NULL;
+            }
+        }
+    }
     pthread_mutex_lock(&s->sdp_lock);
     s->sdp_slot ^= 1;
-    snprintf(s->local_sdp[s->sdp_slot], sizeof(s->local_sdp[0]), "%s", sdp);
+    snprintf(s->local_sdp[s->sdp_slot], sizeof(s->local_sdp[0]), "%s", store);
     snprintf(s->local_type, sizeof(s->local_type), "%s", type);
     s->sdp_gen++;
     pthread_cond_signal(&s->sdp_cond);
     pthread_mutex_unlock(&s->sdp_lock);
+    free(compat);
+    free(with_twcc);
 }
 
 static void on_local_candidate(int pc, const char *cand, const char *mid, void *ptr)
@@ -437,6 +464,10 @@ zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string)
                         s->twcc_enable = (atoi(eq + 1) != 0);
                     } else if (strcmp(tok, "trickle") == 0) {
                         s->trickle = (atoi(eq + 1) != 0);
+                    } else if (strcmp(tok, "codec_pref") == 0 ||
+                               strcmp(tok, "codec-preference") == 0) {
+                        free(s->codec_pref);
+                        s->codec_pref = strdup(eq + 1);
                     }
                 }
                 tok = strtok(NULL, ":,;");
@@ -484,6 +515,7 @@ void zstr_webrtc_free(zstr_webrtc_t **ps)
         rtcDeletePeerConnection(s->pc_id);
     }
     for (int i = 0; i < s->nb_ice_servers; i++) free(s->ice_servers[i]);
+    free(s->codec_pref);
 
     pthread_mutex_lock(&s->rx_lock);
     while (s->rx_count > 0) {
@@ -709,12 +741,39 @@ const char *zstr_webrtc_create_answer(zstr_webrtc_t *s)
 int zstr_webrtc_set_remote_description(zstr_webrtc_t *s, const char *sdp, const char *type)
 {
     if (!s || !s->pc_created || !sdp || !type) return -1;
+    /* TWCC parses the RAW offer (transport-cc lines are kept by our filter,
+     * but parse first so nothing can strip them). */
     if (s->twcc && strcmp(type, "offer") == 0)
         zstr_webrtc_twcc_parse_offer(s->twcc, sdp);
+
+    char *filtered = zstr_sdp_filter(sdp);
+    const char *stage = filtered ? filtered : sdp;
+    char *selected = NULL;
+    if (strcmp(type, "offer") == 0) {
+        selected = zstr_sdp_select_codecs(stage, s->codec_pref,
+                                          s->selected_video, sizeof(s->selected_video),
+                                          s->selected_audio, sizeof(s->selected_audio));
+        if (selected) stage = selected;
+    }
+
     /* NOTE: no engine lock across rtc calls — libdatachannel may dispatch
      * on_track/on_data_channel synchronously, and those take sig_lock. */
-    int ret = rtcSetRemoteDescription(s->pc_id, sdp, type);
+    int ret = rtcSetRemoteDescription(s->pc_id, stage, type);
+    free(filtered);
+    free(selected);
     return ret == RTC_ERR_SUCCESS ? 0 : -1;
+}
+
+int zstr_webrtc_selected_codecs(const zstr_webrtc_t *s,
+                                char *video_out, size_t video_len,
+                                char *audio_out, size_t audio_len)
+{
+    if (!s) return -1;
+    if (video_out && video_len > 0)
+        snprintf(video_out, video_len, "%s", s->selected_video);
+    if (audio_out && audio_len > 0)
+        snprintf(audio_out, audio_len, "%s", s->selected_audio);
+    return 0;
 }
 
 int zstr_webrtc_add_ice_candidate(zstr_webrtc_t *s, const char *cand, const char *mid)

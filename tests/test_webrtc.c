@@ -201,6 +201,14 @@ static void test_webrtc_loopback(void)
     CHECK(zstr_webrtc_wait_connected(g_lb.b, 15000) == 0);
     printf("[INFO] Both peers connected.\n");
 
+    /* Codec selection ran on B's set_remote(offer) */
+    {
+        char v[32] = "", a[32] = "";
+        CHECK(zstr_webrtc_selected_codecs(g_lb.b, v, sizeof(v), a, sizeof(a)) == 0);
+        CHECK(strcmp(v, "H264") == 0);
+        CHECK(strcmp(a, "opus") == 0);
+    }
+
     /* Video round-trip A -> B (Annex-B NAL, as the H264 packetizer expects) */
     uint8_t h264[] = { 0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21, 0xA0, 0x11, 0x22, 0x33 };
     AVPacket *tx = av_packet_alloc();

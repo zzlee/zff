@@ -60,7 +60,7 @@ typedef void (*zstr_webrtc_ice_cb)(const char *candidate, const char *mid, void 
 typedef void (*zstr_webrtc_dc_message_cb)(const char *label, const uint8_t *data,
                                           size_t size, bool is_binary, void *user_data);
 
-/* Lifecycle (config e.g. "stun=host:port:turn=user:pass@host:port:twcc=1:trickle=0") */
+/* Lifecycle (config e.g. "stun=host:port:turn=user:pass@host:port:twcc=1:trickle=0:codec_pref=VP8,H264") */
 zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string);
 void zstr_webrtc_free(zstr_webrtc_t **s);
 
@@ -109,6 +109,11 @@ int zstr_webrtc_send_data(zstr_webrtc_t *s, const char *label,
 
 /* Current GCC estimate in bps (0 when TWCC disabled/unnegotiated) */
 uint64_t zstr_webrtc_bitrate(const zstr_webrtc_t *s);
+
+/* Codec selected from the last remote offer (empty until set_remote). */
+int zstr_webrtc_selected_codecs(const zstr_webrtc_t *s,
+                                char *video_out, size_t video_len,
+                                char *audio_out, size_t audio_len);
 
 /* FFmpeg device formats (built only with HAS_WEBRTC) */
 extern const FFOutputFormat ff_zstr_webrtc_muxer;

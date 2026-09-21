@@ -110,6 +110,14 @@ int zstr_webrtc_send_data(zstr_webrtc_t *s, const char *label,
 /* Current GCC estimate in bps (0 when TWCC disabled/unnegotiated) */
 uint64_t zstr_webrtc_bitrate(const zstr_webrtc_t *s);
 
+/* One-call handshake over a zstr_signaling server. Tracks (and optional
+ * pre-created data channels) must exist before calling. Offerer publishes
+ * its offer and waits for the answer; answerer waits for the offer.
+ * Returns 0 once connected, -1 on timeout/error. */
+int zstr_webrtc_connect_signaling(zstr_webrtc_t *s, const char *url,
+                                  const char *room, bool is_offerer,
+                                  int timeout_ms);
+
 /* Codec selected from the last remote offer (empty until set_remote). */
 int zstr_webrtc_selected_codecs(const zstr_webrtc_t *s,
                                 char *video_out, size_t video_len,

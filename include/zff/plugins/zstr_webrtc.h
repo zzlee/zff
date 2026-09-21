@@ -32,6 +32,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <libavcodec/packet.h>
+#include <libavformat/avformat.h>
+#include "zff/internal/zff_ffformat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,7 +60,7 @@ typedef void (*zstr_webrtc_ice_cb)(const char *candidate, const char *mid, void 
 typedef void (*zstr_webrtc_dc_message_cb)(const char *label, const uint8_t *data,
                                           size_t size, bool is_binary, void *user_data);
 
-/* Lifecycle (config e.g. "stun=host:port:turn=user:pass@host:port:twcc=1") */
+/* Lifecycle (config e.g. "stun=host:port:turn=user:pass@host:port:twcc=1:trickle=0") */
 zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string);
 void zstr_webrtc_free(zstr_webrtc_t **s);
 
@@ -86,6 +88,12 @@ int zstr_webrtc_add_ice_candidate(zstr_webrtc_t *s, const char *candidate, const
 int zstr_webrtc_connected(zstr_webrtc_t *s);
 int zstr_webrtc_wait_connected(zstr_webrtc_t *s, int timeout_ms);
 
+/* ICE gathering: 0 when complete (candidates embedded in local SDP). */
+int zstr_webrtc_wait_gathering(zstr_webrtc_t *s, int timeout_ms);
+/* Non-trickle helper: wait for gathering, then refresh the returned SDP
+ * with the committed (candidate-complete) local description. */
+const char *zstr_webrtc_complete_gathering(zstr_webrtc_t *s, int timeout_ms);
+
 /* Media (AVPacket payload is sent as one track message; RTP timestamp
  * derives from pkt pts in seconds * clock rate, like zstreamer) */
 int zstr_webrtc_send_media(zstr_webrtc_t *s, int track_idx, const AVPacket *pkt);
@@ -101,6 +109,10 @@ int zstr_webrtc_send_data(zstr_webrtc_t *s, const char *label,
 
 /* Current GCC estimate in bps (0 when TWCC disabled/unnegotiated) */
 uint64_t zstr_webrtc_bitrate(const zstr_webrtc_t *s);
+
+/* FFmpeg device formats (built only with HAS_WEBRTC) */
+extern const FFOutputFormat ff_zstr_webrtc_muxer;
+extern const AVInputFormat ff_zstr_webrtc_demuxer;
 
 #ifdef __cplusplus
 }

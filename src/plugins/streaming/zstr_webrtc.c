@@ -63,6 +63,9 @@ struct zstr_webrtc {
     int pc_id;
     bool pc_created;
     rtcState conn_state;
+    rtcGatheringState gathering_state;
+    bool trickle; /* 1 = trickle ICE via ice_cb (default); 0 = wait for
+                     complete gathering so SDPs are self-contained */
 
     /* Local SDP (owned, signaled on generation). Two rotating slots so a
      * previously returned pointer survives one subsequent renegotiation. */
@@ -213,6 +216,17 @@ static void on_state_change(int id, rtcState state, void *ptr)
     pthread_mutex_lock(&s->sig_lock);
     s->conn_state = state;
     pthread_mutex_unlock(&s->sig_lock);
+}
+
+static void on_gathering_state(int pc, rtcGatheringState state, void *ptr)
+{
+    (void)pc;
+    zstr_webrtc_t *s = ptr;
+    if (!s) return;
+    pthread_mutex_lock(&s->sdp_lock);
+    s->gathering_state = state;
+    pthread_cond_signal(&s->sdp_cond);
+    pthread_mutex_unlock(&s->sdp_lock);
 }
 
 static void rx_push(zstr_webrtc_t *s, AVPacket *pkt, int track_idx)
@@ -392,7 +406,9 @@ zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string)
 
     s->pc_id = -1;
     s->conn_state = RTC_NEW;
+    s->gathering_state = RTC_GATHERING_NEW;
     s->twcc_enable = true;
+    s->trickle = true;
     pthread_mutex_init(&s->sdp_lock, NULL);
     pthread_cond_init(&s->sdp_cond, NULL);
     pthread_mutex_init(&s->sig_lock, NULL);
@@ -419,6 +435,8 @@ zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string)
                         s->ice_servers[s->nb_ice_servers++] = strdup(url);
                     } else if (strcmp(tok, "twcc") == 0) {
                         s->twcc_enable = (atoi(eq + 1) != 0);
+                    } else if (strcmp(tok, "trickle") == 0) {
+                        s->trickle = (atoi(eq + 1) != 0);
                     }
                 }
                 tok = strtok(NULL, ":,;");
@@ -444,6 +462,7 @@ zstr_webrtc_t *zstr_webrtc_alloc(const char *opt_string)
     rtcSetLocalDescriptionCallback(s->pc_id, on_local_description);
     rtcSetLocalCandidateCallback(s->pc_id, on_local_candidate);
     rtcSetStateChangeCallback(s->pc_id, on_state_change);
+    rtcSetGatheringStateChangeCallback(s->pc_id, on_gathering_state);
     rtcSetTrackCallback(s->pc_id, on_track);
     rtcSetDataChannelCallback(s->pc_id, on_data_channel);
 
@@ -610,6 +629,45 @@ static const char *wait_sdp_gen(zstr_webrtc_t *s, uint64_t baseline, int timeout
     return ret;
 }
 
+/* Wait until ICE gathering completes (or timeout). Returns 0 on complete. */
+int zstr_webrtc_wait_gathering(zstr_webrtc_t *s, int timeout_ms)
+{
+    if (!s) return -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&s->sdp_lock);
+    while (s->gathering_state != RTC_GATHERING_COMPLETE) {
+        if (pthread_cond_timedwait(&s->sdp_cond, &s->sdp_lock, &ts) == ETIMEDOUT) break;
+    }
+    int ok = (s->gathering_state == RTC_GATHERING_COMPLETE) ? 0 : -1;
+    pthread_mutex_unlock(&s->sdp_lock);
+    return ok;
+}
+
+/* For non-trickle exchange: wait for gathering, then re-read the committed
+ * local description (now with candidates embedded) into the active slot. */
+const char *zstr_webrtc_complete_gathering(zstr_webrtc_t *s, int timeout_ms)
+{
+    if (!s || !s->pc_created) return NULL;
+    zstr_webrtc_wait_gathering(s, timeout_ms); /* best effort; backstop is connect timeout */
+    pthread_mutex_lock(&s->sdp_lock);
+    s->sdp_slot ^= 1;
+    char *dst = s->local_sdp[s->sdp_slot];
+    pthread_mutex_unlock(&s->sdp_lock);
+    if (rtcGetLocalDescription(s->pc_id, dst, ZSTR_WEBRTC_SDP_CAP) < 0) return NULL;
+    pthread_mutex_lock(&s->sdp_lock);
+    s->sdp_gen++;
+    pthread_cond_signal(&s->sdp_cond);
+    pthread_mutex_unlock(&s->sdp_lock);
+    return dst;
+}
+
 const char *zstr_webrtc_create_offer(zstr_webrtc_t *s)
 {
     if (!s || !s->pc_created) return NULL;
@@ -618,7 +676,10 @@ const char *zstr_webrtc_create_offer(zstr_webrtc_t *s)
     pthread_mutex_unlock(&s->sdp_lock);
     if (rtcSetLocalDescription(s->pc_id, "offer") != RTC_ERR_SUCCESS) return NULL;
     /* TWCC extmap is negotiated from the remote offer; nothing to inject here */
-    return wait_sdp_gen(s, baseline, 5000);
+    const char *sdp = wait_sdp_gen(s, baseline, 5000);
+    if (sdp && !s->trickle)
+        sdp = zstr_webrtc_complete_gathering(s, 5000);
+    return sdp;
 }
 
 const char *zstr_webrtc_create_answer(zstr_webrtc_t *s)
@@ -631,6 +692,8 @@ const char *zstr_webrtc_create_answer(zstr_webrtc_t *s)
     pthread_mutex_unlock(&s->sdp_lock);
     if (rtcSetLocalDescription(s->pc_id, "answer") != RTC_ERR_SUCCESS) return NULL;
     const char *sdp = wait_sdp_gen(s, baseline, 5000);
+    if (sdp && !s->trickle)
+        sdp = zstr_webrtc_complete_gathering(s, 5000);
     if (sdp) {
         /* TWCC extmap injection documents the extmap for the app; the SDP
          * is already committed inside libdatachannel. */

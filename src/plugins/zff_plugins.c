@@ -14,6 +14,9 @@
 #include "zff/plugins/zstr_rtsp_server.h"
 #include "zff/plugins/zstr_st2110.h"
 #include "zff/plugins/zstr_srt.h"
+#ifdef HAS_WEBRTC
+#include "zff/plugins/zstr_webrtc.h"
+#endif
 
 int zff_plugins_register_all(void) {
     zff_register_input_format(&ff_zstr_videotestsrc_demuxer);
@@ -31,6 +34,10 @@ int zff_plugins_register_all(void) {
     zff_register_output_format(&ff_zstr_rtspserver_muxer.p);
     zff_register_output_format(&ff_zstr_st2110_muxer.p);
     zff_register_output_format(&ff_zstr_srt_sink_muxer.p);
+#ifdef HAS_WEBRTC
+    zff_register_input_format(&ff_zstr_webrtc_demuxer);
+    zff_register_output_format(&ff_zstr_webrtc_muxer.p);
+#endif
     return 0;
 }
 

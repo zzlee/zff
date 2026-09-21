@@ -136,6 +136,45 @@ int zstr_amix_set_input_pan(zstr_amix_t *m, int input_idx, double pan) {
     return 0;
 }
 
+int zstr_amix_set_param(zstr_amix_t *m, const char *param_str) {
+    if (!m || !param_str || param_str[0] == '\0') return AVERROR(EINVAL);
+    char *copy = strdup(param_str);
+    if (!copy) return AVERROR(ENOMEM);
+
+    char *token = strtok(copy, ":,");
+    while (token) {
+        char *eq = strchr(token, '=');
+        if (eq) {
+            *eq = '\0';
+            const char *key = token;
+            const char *val = eq + 1;
+
+            if (strncmp(key, "volume@", 7) == 0 || strncmp(key, "vol@", 4) == 0) {
+                const char *at = strchr(key, '@');
+                int idx = atoi(at + 1);
+                if (idx >= 0 && idx < m->nb_inputs) {
+                    m->slots[idx].volume = atof(val);
+                }
+            } else if (strncmp(key, "mute@", 5) == 0) {
+                int idx = atoi(key + 5);
+                if (idx >= 0 && idx < m->nb_inputs) {
+                    m->slots[idx].mute = (atoi(val) != 0);
+                }
+            } else if (strncmp(key, "pan@", 4) == 0) {
+                int idx = atoi(key + 4);
+                if (idx >= 0 && idx < m->nb_inputs) {
+                    m->slots[idx].pan = atof(val);
+                }
+            } else if (strcmp(key, "normalize") == 0) {
+                m->normalize = atoi(val);
+            }
+        }
+        token = strtok(NULL, ":,");
+    }
+    free(copy);
+    return 0;
+}
+
 static AVFrame* resample_input_if_needed(zstr_amix_t *m, int idx, const AVFrame *in) {
     amix_slot_t *slot = &m->slots[idx];
 
@@ -209,7 +248,7 @@ static AVFrame* resample_input_if_needed(zstr_amix_t *m, int idx, const AVFrame 
     return conv;
 }
 
-int zstr_amix_mix(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame *out) {
+int zstr_amix_process(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame *out) {
     if (!m || !in || nb_in <= 0 || !out) {
         return AVERROR(EINVAL);
     }

@@ -60,7 +60,7 @@ static void test_amix_basic_mixing(void) {
     AVFrame *out = av_frame_alloc();
     assert(out != NULL);
 
-    int ret = zstr_amix_mix(m, inputs, 2, out);
+    int ret = zstr_amix_process(m, inputs, 2, out);
     assert(ret == 0);
     assert(out->sample_rate == 48000);
     assert(out->ch_layout.nb_channels == 2);
@@ -91,9 +91,8 @@ static void test_amix_mute_and_volume(void) {
     zstr_amix_t *m = zstr_amix_alloc("inputs=2:sample_rate=48000:channels=2:sample_fmt=flt");
     assert(m != NULL);
 
-    /* Mute input 0, set input 1 volume to 0.5 */
-    zstr_amix_set_input_mute(m, 0, true);
-    zstr_amix_set_input_volume(m, 1, 0.5);
+    /* Mute input 0, set input 1 volume to 0.5 via unified zstr_amix_set_param */
+    assert(zstr_amix_set_param(m, "mute@0=1:volume@1=0.5") == 0);
 
     AVFrame *f1 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 440.0, 1.0);
     AVFrame *f2 = create_audio_frame(48000, 2, AV_SAMPLE_FMT_FLT, 512, 880.0, 1.0);
@@ -102,7 +101,7 @@ static void test_amix_mute_and_volume(void) {
     AVFrame *out = av_frame_alloc();
     assert(out != NULL);
 
-    int ret = zstr_amix_mix(m, inputs, 2, out);
+    int ret = zstr_amix_process(m, inputs, 2, out);
     assert(ret == 0);
 
     /* Output should only contain f2 scaled by 0.5 (max amplitude ~0.5) */
@@ -138,7 +137,7 @@ static void test_amix_resampling_cross_format(void) {
     AVFrame *out = av_frame_alloc();
     assert(out != NULL);
 
-    int ret = zstr_amix_mix(m, inputs, 2, out);
+    int ret = zstr_amix_process(m, inputs, 2, out);
     assert(ret == 0);
     assert(out->sample_rate == 48000);
     assert(out->ch_layout.nb_channels == 2);
@@ -164,7 +163,7 @@ static void test_amix_soft_clipping_limiter(void) {
     const AVFrame *inputs[2] = { f1, f2 };
 
     AVFrame *out = av_frame_alloc();
-    int ret = zstr_amix_mix(m, inputs, 2, out);
+    int ret = zstr_amix_process(m, inputs, 2, out);
     assert(ret == 0);
 
     const float *data = (const float *)out->data[0];

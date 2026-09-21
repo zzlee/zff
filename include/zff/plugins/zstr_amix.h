@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <libavutil/frame.h>
-#include <libavutil/samplefmt.h>
-#include <libavutil/channel_layout.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,27 +19,32 @@ typedef struct zstr_amix zstr_amix_t;
  * Allocate and initialize a zstr_amix instance.
  *
  * @param opt_string Key=value configuration string.
- *                   e.g. "inputs=2:sample_rate=48000:channels=2:sample_fmt=flt:normalize=0"
+ *                   e.g. "inputs=2:sample_rate=48000:channels=2:sample_fmt=flt:normalize=0:weights=1.0|0.8"
  *                   Options:
  *                     - inputs: number of inputs (default 2, up to 32)
- *                     - sample_rate: output master sample rate (default 48000)
+ *                     - sample_rate, rate: output master sample rate (default 48000)
  *                     - channels: output master channels (default 2)
- *                     - sample_fmt: output format ("s16", "s32", "flt", default "flt")
+ *                     - sample_fmt, format: output format ("s16", "s32", "flt", default "flt")
  *                     - normalize: 1 = divide by active inputs, 0 = soft-clipping limiter (default 0)
- *                     - weights: colon-separated weights (e.g. "1.0:0.8")
+ *                     - weights: pipe-separated volumes (e.g. "1.0|0.8")
  * @return Allocated instance, or NULL on error.
  */
 zstr_amix_t* zstr_amix_alloc(const char *opt_string);
 
 /**
- * Configure per-input channel properties.
+ * Dynamically configure runtime parameters via key=value string.
+ * Supported options:
+ *   - "volume@<idx>=<val>" (e.g. "volume@0=0.5")
+ *   - "mute@<idx>=<0|1>"   (e.g. "mute@1=1")
+ *   - "pan@<idx>=<val>"    (e.g. "pan@0=-0.5")
+ *   - "normalize=<0|1>"
+ *
+ * Multiple options can be separated by ':' or ','.
  */
-int zstr_amix_set_input_volume(zstr_amix_t *m, int input_idx, double volume);
-int zstr_amix_set_input_mute(zstr_amix_t *m, int input_idx, bool mute);
-int zstr_amix_set_input_pan(zstr_amix_t *m, int input_idx, double pan);
+int zstr_amix_set_param(zstr_amix_t *m, const char *param_str);
 
 /**
- * Direct synchronous mix helper:
+ * Direct synchronous frame processing:
  * Mixes multiple input AVFrames directly into one output AVFrame.
  * Automatically performs sample rate/format conversion and soft-clipping limiter.
  *
@@ -51,12 +54,17 @@ int zstr_amix_set_input_pan(zstr_amix_t *m, int input_idx, double pan);
  * @param out     Output AVFrame.
  * @return 0 on success, negative AVERROR on error.
  */
-int zstr_amix_mix(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame *out);
+int zstr_amix_process(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame *out);
 
 /**
  * Free zstr_amix instance and resources.
  */
 void zstr_amix_free(zstr_amix_t **m);
+
+/* ── Backward Compatibility Helper Wrappers ────────────────────────────── */
+static inline int zstr_amix_mix(zstr_amix_t *m, const AVFrame * const *in, int nb_in, AVFrame *out) {
+    return zstr_amix_process(m, in, nb_in, out);
+}
 
 #ifdef __cplusplus
 }

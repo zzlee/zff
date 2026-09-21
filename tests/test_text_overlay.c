@@ -59,9 +59,7 @@ static void test_lifecycle_and_config(void)
     zstr_text_overlay_t *s = zstr_text_overlay_alloc("text=Hello:font_size=28:x=15:y=25:box=1:color=0xFFFF00FF:timecode=0");
     assert(s != NULL);
 
-    zstr_text_overlay_set_text(s, "Updated Text");
-    zstr_text_overlay_set_position(s, 30, 40);
-    zstr_text_overlay_enable_timecode(s, true);
+    assert(zstr_text_overlay_set_param(s, "text=Updated Text:x=30:y=40:timecode=1") == 0);
 
     zstr_text_overlay_free(&s);
     assert(s == NULL);
@@ -183,7 +181,7 @@ static void test_subtitles_and_timecode(void)
     assert(text_present == false);
 
     /* Enable dynamic timecode and verify it renders */
-    zstr_text_overlay_enable_timecode(s, true);
+    assert(zstr_text_overlay_set_param(s, "timecode=1") == 0);
     f->pts = 3000;
     ret = zstr_text_overlay_process(s, f, f);
     assert(ret == 0);

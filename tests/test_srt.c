@@ -95,16 +95,7 @@ static void test_srt_parser_overlay_integration(void)
     zstr_srt_parser_t *p = zstr_srt_parser_create_from_memory(k_sample_srt, strlen(k_sample_srt));
     assert(p != NULL);
 
-    zstr_text_overlay_config_t cfg = {
-        .text = NULL,
-        .x = 20,
-        .y = 40,
-        .font_size = 24,
-        .text_color = 0xFFFFFFFF,
-        .draw_box = true,
-        .box_color = 0x00000080
-    };
-    zstr_text_overlay_t *overlay = zstr_text_overlay_create(&cfg);
+    zstr_text_overlay_t *overlay = zstr_text_overlay_alloc("x=20:y=40:font_size=24:box=1:color=0xFFFFFFFF");
     assert(overlay != NULL);
 
     AVRational tb = (AVRational){ 1, 1000 };

@@ -263,6 +263,24 @@ static void draw_glyph_8x16(AVFrame *frame, int x, int y, char c,
 }
 
 /* ---------------------------------------------------------------------------
+ * Internal Configuration Structure
+ * --------------------------------------------------------------------------- */
+typedef struct {
+    const char *text;
+    const char *font_path;
+    int font_size;
+    int x;
+    int y;
+    uint32_t text_color;
+    bool draw_box;
+    uint32_t box_color;
+    bool show_timecode;
+    AVRational timecode_rate;
+} zstr_text_overlay_config_t;
+
+static zstr_text_overlay_t* zstr_text_overlay_create_internal(const zstr_text_overlay_config_t *cfg);
+
+/* ---------------------------------------------------------------------------
  * Lifecycle & Initialization
  * --------------------------------------------------------------------------- */
 zstr_text_overlay_t* zstr_text_overlay_alloc(const char *opt_string)
@@ -312,16 +330,16 @@ zstr_text_overlay_t* zstr_text_overlay_alloc(const char *opt_string)
                 }
                 tok = strtok(NULL, ":,");
             }
-            zstr_text_overlay_t *res = zstr_text_overlay_create(&cfg);
+            zstr_text_overlay_t *res = zstr_text_overlay_create_internal(&cfg);
             free(copy);
             return res;
         }
     }
 
-    return zstr_text_overlay_create(&cfg);
+    return zstr_text_overlay_create_internal(&cfg);
 }
 
-zstr_text_overlay_t* zstr_text_overlay_create(const zstr_text_overlay_config_t *cfg)
+static zstr_text_overlay_t* zstr_text_overlay_create_internal(const zstr_text_overlay_config_t *cfg)
 {
     zstr_text_overlay_t *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
@@ -371,6 +389,52 @@ zstr_text_overlay_t* zstr_text_overlay_create(const zstr_text_overlay_config_t *
 #endif
 
     return s;
+}
+
+int zstr_text_overlay_set_param(zstr_text_overlay_t *s, const char *param_str)
+{
+    if (!s || !param_str || param_str[0] == '\0') return AVERROR(EINVAL);
+    char *copy = strdup(param_str);
+    if (!copy) return AVERROR(ENOMEM);
+
+    pthread_mutex_lock(&s->lock);
+    char *tok = strtok(copy, ":,");
+    while (tok) {
+        char *eq = strchr(tok, '=');
+        if (eq) {
+            *eq = '\0';
+            const char *k = tok;
+            const char *v = eq + 1;
+
+            if (strcmp(k, "text") == 0) {
+                strncpy(s->text, v, sizeof(s->text) - 1);
+                s->text[sizeof(s->text) - 1] = '\0';
+            } else if (strcmp(k, "x") == 0) {
+                s->x = atoi(v);
+            } else if (strcmp(k, "y") == 0) {
+                s->y = atoi(v);
+            } else if (strcmp(k, "color") == 0) {
+                s->text_color = (uint32_t)strtoul(v, NULL, 0);
+            } else if (strcmp(k, "box") == 0) {
+                s->draw_box = (atoi(v) != 0);
+            } else if (strcmp(k, "boxcolor") == 0) {
+                s->box_color = (uint32_t)strtoul(v, NULL, 0);
+            } else if (strcmp(k, "timecode") == 0) {
+                s->show_timecode = (atoi(v) != 0);
+            } else if (strcmp(k, "font_size") == 0 || strcmp(k, "size") == 0) {
+                s->font_size = atoi(v);
+#if HAVE_FREETYPE
+                if (s->ft_ready && s->font_size > 0) {
+                    FT_Set_Pixel_Sizes(s->ft_face, 0, s->font_size);
+                }
+#endif
+            }
+        }
+        tok = strtok(NULL, ":,");
+    }
+    pthread_mutex_unlock(&s->lock);
+    free(copy);
+    return 0;
 }
 
 int zstr_text_overlay_set_text(zstr_text_overlay_t *s, const char *text)

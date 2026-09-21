@@ -130,6 +130,14 @@ int zstr_webrtc_connect_signaling(zstr_webrtc_t *s, const char *url,
                                   const char *room, bool is_offerer,
                                   int timeout_ms);
 
+/* One-call WHIP publish (RFC 9725): offer -> HTTP POST -> answer ->
+ * connected. Tracks must exist before calling. Non-trickle (candidates
+ * embedded via complete gathering). resource_url_out receives the session
+ * URL for PATCH/DELETE (caller frees with free(), may be NULL).
+ * Returns 0 once connected, negative AVERROR on failure. */
+int zstr_webrtc_whip_publish(zstr_webrtc_t *s, const char *whip_url,
+                             char **resource_url_out, int timeout_ms);
+
 /* Codec selected from the last remote offer (empty until set_remote). */
 int zstr_webrtc_selected_codecs(const zstr_webrtc_t *s,
                                 char *video_out, size_t video_len,

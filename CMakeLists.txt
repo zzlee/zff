@@ -115,6 +115,8 @@ if(HAS_WEBRTC)
         src/plugins/streaming/zstr_webrtc_device.c
         src/plugins/streaming/zstr_signaling.c
         src/plugins/streaming/zstr_webrtc_signaling.c
+        src/plugins/streaming/zstr_whip.c
+        src/plugins/streaming/zstr_webrtc_whip.c
     )
     add_compile_definitions(HAS_WEBRTC=1)
 endif()
@@ -235,6 +237,10 @@ if(BUILD_TESTS)
         add_executable(test_webrtc_signaling tests/test_webrtc_signaling.c)
         target_link_libraries(test_webrtc_signaling PRIVATE zff-plugins zff-core pthread)
         add_test(NAME test_webrtc_signaling COMMAND test_webrtc_signaling)
+
+        add_executable(test_webrtc_whip tests/test_webrtc_whip.c)
+        target_link_libraries(test_webrtc_whip PRIVATE zff-plugins zff-core pthread)
+        add_test(NAME test_webrtc_whip COMMAND test_webrtc_whip)
     endif()
 
     add_executable(test_st2110 tests/test_st2110.c)

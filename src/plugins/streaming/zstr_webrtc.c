@@ -103,6 +103,9 @@ struct zstr_webrtc {
     } dcs[ZSTR_WEBRTC_MAX_DC];
     int nb_dcs;
 
+    /* Diagnostics: PSFB/PLI packets seen at the PC-level tap */
+    uint64_t pli_rx_count;
+
     /* Inbound (remote-created) tracks: handle -> codec clock for PTS */
     struct {
         int track_id;
@@ -114,6 +117,8 @@ struct zstr_webrtc {
     /* App callbacks */
     zstr_webrtc_bitrate_cb bitrate_cb;
     void *bitrate_ud;
+    zstr_webrtc_keyframe_cb keyframe_cb;
+    void *keyframe_ud;
     zstr_webrtc_ice_cb ice_cb;
     void *ice_ud;
     zstr_webrtc_dc_message_cb dc_cb;
@@ -167,11 +172,51 @@ static zstr_webrtc_codec_t codec_from_sdp(const char *sdp)
     return ZSTR_WEBRTC_CODEC_H264;
 }
 
+static void on_pli_shim(int tr, void *ptr)
+{
+    zstr_webrtc_t *s = ptr;
+    if (!s) return;
+    /* Resolve media index from send tracks, then recv table */
+    int idx = -1;
+    pthread_mutex_lock(&s->sig_lock);
+    for (int i = 0; i < s->nb_tracks && idx < 0; i++) {
+        if (s->tracks[i].track_id == tr) idx = i;
+    }
+    for (int i = 0; i < s->nb_recv && idx < 0; i++) {
+        if (s->recv[i].active && s->recv[i].track_id == tr) idx = i;
+    }
+    zstr_webrtc_keyframe_cb cb = s->keyframe_cb;
+    void *ud = s->keyframe_ud;
+    pthread_mutex_unlock(&s->sig_lock);
+    if (cb && idx >= 0) cb(idx, ud);
+}
+
+static void on_remb_shim(int tr, unsigned int bitrate, void *ptr)
+{
+    (void)tr;
+    zstr_webrtc_t *s = ptr;
+    if (!s) return;
+    /* Receiver-estimated bitrate is a direct congestion signal: surface it
+     * through the same application callback as the GCC estimate. */
+    pthread_mutex_lock(&s->sig_lock);
+    zstr_webrtc_bitrate_cb cb = s->bitrate_cb;
+    void *ud = s->bitrate_ud;
+    pthread_mutex_unlock(&s->sig_lock);
+    if (cb) cb((uint64_t)bitrate, ud);
+}
+
 /* --- TWCC interceptor shims --- */
 static void *twcc_incoming_shim(int pc, const char *msg, int size, void *ptr)
 {
     (void)pc;
     zstr_webrtc_t *s = ptr;
+    if (s && msg && size == 12) {
+        const uint8_t *b = (const uint8_t *)msg;
+        /* RTCP PSFB/PLI is exactly 12 bytes; our dynamic RTP PTs
+         * (96/111/126) can never alias PT byte 206. */
+        if (b[1] == 206 && (b[0] & 0x1F) == 1)
+            s->pli_rx_count++;
+    }
     if (s && s->twcc) return zstr_webrtc_twcc_process_incoming(s->twcc, msg, size);
     return (void *)msg;
 }
@@ -331,6 +376,7 @@ static void on_track(int pc, int tr, void *ptr)
     }
     pthread_mutex_unlock(&s->sig_lock);
 
+
     /* Attach the matching depacketizer so on_frame receives full frames.
      * (Sending tracks need explicit packetizers; remote tracks need the
      * mirror depacketizer — libdatachannel does not auto-attach it.) */
@@ -349,6 +395,17 @@ static void on_track(int pc, int tr, void *ptr)
         case ZSTR_WEBRTC_CODEC_PCMA: rtcSetPCMADepacketizer(tr); break;
         default: break;
     }
+
+    /* RTCP receiving session: learns sender SSRCs from inbound RTP so that
+     * rtcRequestKeyframe() on this track emits a routable PLI. Without it
+     * the request targets SSRC 0 and dies in the sender's SSRC demux. */
+    rtcChainRtcpReceivingSession(tr);
+
+    /* PliHandler on recv tracks too: RTCP demux may deliver a PLI/FIR to
+     * any track object carrying a matching SSRC association, and only
+     * tracks with a PliHandler surface it to keyframe_cb. Harmless for
+     * media (pass-through for non-feedback RTCP). */
+    rtcChainPliHandler(tr, on_pli_shim);
 
     /* Frame callback routes into the shared FIFO */
     rtcSetUserPointer(tr, s);
@@ -623,8 +680,15 @@ static int add_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
         }
     }
 
+    rtcChainPliHandler(tr, on_pli_shim);
     if (s->twcc_enable)
         rtcSetTrackInterceptorCallback(tr, twcc_outgoing_shim);
+    /* RTCP QoS chain: ReceivingSession routes incoming RTCP (PLI included)
+     * to the handlers; SrReporter emits sender reports for receivers. */
+    rtcChainRtcpReceivingSession(tr);
+    rtcChainRtcpSrReporter(tr);
+    rtcChainRtcpNackResponder(tr, RTC_DEFAULT_MAXIMUM_PACKET_COUNT_FOR_NACK_CACHE);
+    rtcChainRembHandler(tr, on_remb_shim);
     return s->nb_tracks++;
 }
 
@@ -809,6 +873,37 @@ int zstr_webrtc_wait_connected(zstr_webrtc_t *s, int timeout_ms)
     }
 }
 
+void zstr_webrtc_set_keyframe_cb(zstr_webrtc_t *s, zstr_webrtc_keyframe_cb cb,
+                                 void *user_data)
+{
+    if (!s) return;
+    pthread_mutex_lock(&s->sig_lock);
+    s->keyframe_cb = cb;
+    s->keyframe_ud = user_data;
+    pthread_mutex_unlock(&s->sig_lock);
+}
+
+int zstr_webrtc_request_keyframe(zstr_webrtc_t *s, int track_idx)
+{
+    if (!s || track_idx < 0) return -1;
+    /* Prefer the RECV track: it owns a transport once media flows, so the
+     * session's PLI actually emits. A SEND track that never transmitted has
+     * no bound transport and the request throws inside libdatachannel.
+     * Fall back to send tracks (sender-only topologies). */
+    int tr = -1;
+    pthread_mutex_lock(&s->sig_lock);
+    for (int i = 0; i < s->nb_recv && tr < 0; i++) {
+        if (s->recv[i].active && i == track_idx)
+            tr = s->recv[i].track_id;
+    }
+    if (tr < 0 && track_idx < s->nb_tracks &&
+        s->tracks[track_idx].track_id >= 0)
+        tr = s->tracks[track_idx].track_id;
+    pthread_mutex_unlock(&s->sig_lock);
+    if (tr < 0) return -1;
+    return rtcRequestKeyframe(tr) == RTC_ERR_SUCCESS ? 0 : -1;
+}
+
 /* --- Media --- */
 int zstr_webrtc_send_media(zstr_webrtc_t *s, int track_idx, const AVPacket *pkt)
 {
@@ -923,4 +1018,14 @@ uint64_t zstr_webrtc_bitrate(const zstr_webrtc_t *s)
 {
     if (!s || !s->twcc) return 0;
     return zstr_webrtc_twcc_bitrate(s->twcc);
+}
+
+/* Diagnostics: number of PLI feedback packets observed inbound.
+ * NOTE: in loopback, a peer's session stamps OUR OWN SSRC as the PLI
+ * sender, which this libdatachannel build drops as looped-back traffic
+ * before any track sees it — so keyframe_cb fires only for genuine
+ * remote senders (e.g. Chrome). The counter proves emission+transport. */
+uint64_t zstr_webrtc_pli_received(const zstr_webrtc_t *s)
+{
+    return s ? s->pli_rx_count : 0;
 }

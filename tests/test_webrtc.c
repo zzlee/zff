@@ -160,6 +160,14 @@ static void dc_on_message(const char *label, const uint8_t *data, size_t size,
     g_lb.dc_got = 1;
 }
 
+static volatile int g_pli_track = -1;
+
+static void on_pli_cb(int track_idx, void *ud)
+{
+    (void)ud;
+    g_pli_track = track_idx;
+}
+
 static void test_webrtc_loopback(void)
 {
     printf("[TEST] PeerConnection loopback (offer/answer + ICE + media + DC)...\n");
@@ -172,6 +180,7 @@ static void test_webrtc_loopback(void)
     zstr_webrtc_set_ice_cb(g_lb.a, ice_to_b, NULL);
     zstr_webrtc_set_ice_cb(g_lb.b, ice_to_a, NULL);
     zstr_webrtc_set_dc_message_cb(g_lb.b, dc_on_message, NULL);
+    zstr_webrtc_set_keyframe_cb(g_lb.a, on_pli_cb, NULL);
 
     CHECK(zstr_webrtc_add_video_track(g_lb.a, ZSTR_WEBRTC_CODEC_H264, 126, 90000) == 0);
     CHECK(zstr_webrtc_add_audio_track(g_lb.a, ZSTR_WEBRTC_CODEC_OPUS, 111, 48000) == 1);
@@ -274,6 +283,29 @@ static void test_webrtc_loopback(void)
     CHECK(g_lb.dc_rx_len == strlen(msg));
     CHECK(memcmp(g_lb.dc_rx, msg, strlen(msg)) == 0);
     printf("[INFO] Data channel verified.\n");
+
+    /* PLI round-trip: B asks, A's transport observes the PLI.
+     * B's session stamps OUR OWN SSRC as the PLI sender (libdatachannel
+     * fills both fields from its learned SSRC), which this build's SSRC
+     * demux drops as looped-back traffic before any track sees it — so
+     * keyframe_cb (kept armed above for genuine remote senders like
+     * Chrome, whose sender SSRC differs) cannot fire in loopback.
+     * What loopback DOES prove: request accepted + PLI bytes for A's
+     * video SSRC arrive at A's transport (pli_received counter). */
+    g_pli_track = -1;
+    int req_ok = 0;
+    for (int i = 0; i < 4; i++) {
+        if (zstr_webrtc_request_keyframe(g_lb.b, i) == 0) {
+            req_ok = 1;
+            break;
+        }
+    }
+    CHECK(req_ok);
+    uint64_t pli0 = zstr_webrtc_pli_received(g_lb.a);
+    for (int i = 0; i < 100 && zstr_webrtc_pli_received(g_lb.a) == pli0; i++)
+        usleep(50000);
+    CHECK(zstr_webrtc_pli_received(g_lb.a) > pli0);
+    printf("[INFO] PLI round-trip verified (transport-level arrival).\n");
 
     zstr_webrtc_free(&g_lb.a);
     zstr_webrtc_free(&g_lb.b);

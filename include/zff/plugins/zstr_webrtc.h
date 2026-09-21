@@ -107,6 +107,18 @@ int zstr_webrtc_create_data_channel(zstr_webrtc_t *s, const char *label);
 int zstr_webrtc_send_data(zstr_webrtc_t *s, const char *label,
                           const uint8_t *data, size_t size);
 
+/* Keyframe (PLI) handling: the sender gets keyframe_cb when the remote
+ * asks for an IDR (chain via rtcChainPliHandler); either side may ask with
+ * request_keyframe (track media index, sent over RTCP). */
+typedef void (*zstr_webrtc_keyframe_cb)(int track_idx, void *user_data);
+void zstr_webrtc_set_keyframe_cb(zstr_webrtc_t *s, zstr_webrtc_keyframe_cb cb,
+                                 void *user_data);
+int zstr_webrtc_request_keyframe(zstr_webrtc_t *s, int track_idx);
+
+/* Diagnostics: inbound PLI feedback packets observed at transport level.
+ * See the note on zstr_webrtc_pli_received() in the implementation. */
+uint64_t zstr_webrtc_pli_received(const zstr_webrtc_t *s);
+
 /* Current GCC estimate in bps (0 when TWCC disabled/unnegotiated) */
 uint64_t zstr_webrtc_bitrate(const zstr_webrtc_t *s);
 

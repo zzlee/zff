@@ -33,12 +33,14 @@ static void test_filter(void)
         "a=extmap:4 urn:3gpp:video-orientation\r\n"
         "a=rtpmap:126 H264/90000\r\n"
         "a=rtcp-fb:126 transport-cc\r\n"
+        "a=rtcp-fb:126 ccm fir\r\n"
         "a=rtcp-fb:126 nack\r\n";
     char *out = zstr_sdp_filter(in);
     CHECK(out != NULL);
     /* Stripped */
     CHECK(strstr(out, "abs-send-time") == NULL);
     CHECK(strstr(out, "video-orientation") == NULL);
+    CHECK(strstr(out, "ccm fir") == NULL);
     /* Kept: TWCC extmap (zff deviation) + transport-cc fb + mid extmap */
     CHECK(strstr(out, "transport-wide-cc-extensions-01") != NULL);
     CHECK(strstr(out, "a=rtcp-fb:126 transport-cc") != NULL);

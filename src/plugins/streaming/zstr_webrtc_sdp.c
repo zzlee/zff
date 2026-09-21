@@ -380,6 +380,18 @@ zstr_sdp_filter(const char* sdp)
                 keep = false;
                 av_log(NULL, AV_LOG_INFO, "webrtc_sdp: " "Filtered unsupported SDP extension: %.*s", (int)content_len, line);
             }
+        } else if (content_len >= 10 && memcmp(line, "a=rtcp-fb:", 10) == 0) {
+            /* NOTE (zff deviation): strip "ccm fir". libdatachannel then
+             * uses plain PLI (universally supported, and what our PliHandler
+             * detects) instead of FIR, whose request path throws in this
+             * libdatachannel build when the sender SSRC is learned late.
+             * Peers may still SEND us fir — PliHandler handles FMT=4. */
+            const char* content = line + 10;
+            size_t clen = content_len - 10;
+            if (WEBRTC_MEMSTR(content, clen, "ccm fir")) {
+                keep = false;
+                av_log(NULL, AV_LOG_INFO, "webrtc_sdp: Filtered ccm-fir RTCP feedback: %.*s", (int)content_len, line);
+            }
         }
 
         if (keep) {

@@ -13,7 +13,8 @@ extern "C" {
 
 /* Strip extension/rtcp-fb lines libdatachannel cannot negotiate.
  * Keeps transport-wide-cc (feeds TWCC); strips abs-send-time,
- * goog-playout-delay, video-orientation, ssrc-audio-level. */
+ * goog-playout-delay, video-orientation, ssrc-audio-level, and ccm fir
+ * (plain PLI is universal; the FIR request path is unreliable). */
 char *zstr_sdp_filter(const char *sdp);
 
 /* Restrict each m-section to the best codec per preference list

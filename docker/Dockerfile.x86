@@ -48,7 +48,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     valgrind \
     strace \
+    patch \
     && rm -rf /var/lib/apt/lists/*
+
+# ── libdatachannel (WebRTC) with zff TWCC interceptor patch ─────────────────
+# Mirrors zstreamer: outgoing track interceptors needed for TWCC sender-side
+# (transport-cc injection + RTCP CCFB processing in zstr_webrtc_twcc).
+COPY scripts/libdatachannel-twcc.patch /tmp/
+RUN cd /tmp && \
+    git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/paullouisageneau/libdatachannel.git && \
+    cd libdatachannel && \
+    patch -p1 < /tmp/libdatachannel-twcc.patch && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+             -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF \
+             -DENABLE_MEDIA=ON -DENABLE_DATACHANNELS=ON \
+             -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/libdatachannel /tmp/libdatachannel-twcc.patch
 
 WORKDIR /workspace
 

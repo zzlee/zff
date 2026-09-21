@@ -30,6 +30,19 @@ pkg_check_modules(FREETYPE freetype2)
 find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
 find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
 
+# WebRTC (libdatachannel, patched with outgoing track interceptors for TWCC)
+find_package(LibDataChannel QUIET)
+if(NOT LibDataChannel_FOUND)
+    pkg_check_modules(DATACHANNEL QUIET libdatachannel)
+endif()
+if(LibDataChannel_FOUND OR DATACHANNEL_FOUND)
+    set(HAS_WEBRTC ON)
+    message(STATUS "WebRTC enabled (libdatachannel found)")
+else()
+    set(HAS_WEBRTC OFF)
+    message(STATUS "WebRTC disabled (libdatachannel not found)")
+endif()
+
 # Include directories
 include_directories(
     include
@@ -94,7 +107,28 @@ set(PLUGINS_SOURCES
     src/plugins/streaming/zstr_srt_sink.c
 )
 
+if(HAS_WEBRTC)
+    list(APPEND PLUGINS_SOURCES
+        src/plugins/streaming/zstr_webrtc.c
+        src/plugins/streaming/zstr_webrtc_twcc.c
+    )
+    add_compile_definitions(HAS_WEBRTC=1)
+endif()
+
 add_library(zff-plugins ${PLUGINS_SOURCES})
+
+if(HAS_WEBRTC)
+    if(LibDataChannel_FOUND)
+        get_target_property(_ldc_includes LibDataChannel::LibDataChannel INTERFACE_INCLUDE_DIRECTORIES)
+        if(_ldc_includes)
+            target_include_directories(zff-plugins PRIVATE ${_ldc_includes})
+        endif()
+        target_link_libraries(zff-plugins PUBLIC LibDataChannel::LibDataChannel)
+    elseif(DATACHANNEL_FOUND)
+        target_include_directories(zff-plugins PRIVATE ${DATACHANNEL_INCLUDE_DIRS})
+        target_link_libraries(zff-plugins PUBLIC ${DATACHANNEL_LIBRARIES})
+    endif()
+endif()
 
 target_link_libraries(zff-plugins
     PUBLIC
@@ -180,6 +214,12 @@ if(BUILD_TESTS)
     add_executable(test_rtsp_server tests/test_rtsp_server.c)
     target_link_libraries(test_rtsp_server PRIVATE zff-plugins zff-core pthread)
     add_test(NAME test_rtsp_server COMMAND test_rtsp_server)
+
+    if(HAS_WEBRTC)
+        add_executable(test_webrtc tests/test_webrtc.c)
+        target_link_libraries(test_webrtc PRIVATE zff-plugins zff-core pthread)
+        add_test(NAME test_webrtc COMMAND test_webrtc)
+    endif()
 
     add_executable(test_st2110 tests/test_st2110.c)
     target_link_libraries(test_st2110 PRIVATE zff-plugins zff-core pthread)

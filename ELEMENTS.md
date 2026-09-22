@@ -36,7 +36,7 @@ All elements migrated from `zstreamer` are named with the **`zstr_`** prefix and
 | **`zstr_glsink`** | Video Sink (`vsink_`) | `gl_sink.c` | **OpenGL/GLX zero-copy display**; GLSL YUV420P/NV12 ➔ RGB shader; Xvfb headless support | Takes `AVFrame` (CPU or DRM_PRIME) | `display`, `fullscreen`, `vsync`, `window_title` |
 | **`zstr_glcompositor`**| Video Filter (`vf_`) | `gl_comp_sink.c` | **GPU multi-channel compositor**; PiP, grid layouts, custom borders, alpha blending | Multi `AVFrame` ➔ Single `AVFrame` | `layout`, `background`, `border_width`, `border_color` |
 | **`zstr_ipp_comp`** | Video Filter (`vf_`) | `ipp_comp_sink.c` | **Intel IPP CPU compositor**; high-speed CPU multi-video mixing | Multi `AVFrame` ➔ Single `AVFrame` | `layout`, `threads` |
-| **`zstr_x11sink`** | Video Sink (`vsink_`) | `x11_sink.c` | **X11 MIT-SHM shared memory sink**; fast X11 rendering | Takes `AVFrame` | `display`, `window_id` |
+| **`zstr_x11sink`** | Video Sink (`vsink_`) | `x11_sink.c` | **X11 software display**; sws straight into XImage (TrueColor fast path, per-pixel fallback for exotic visuals); Expose re-blit; Xvfb-tested | Takes `AVFrame` | `display`, `window_title`, `is_mock` |
 
 ---
 

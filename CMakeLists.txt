@@ -105,6 +105,7 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_alsa_sink.c
     src/plugins/audio/zstr_amix.c
     src/plugins/video/zstr_glsink.c
+    src/plugins/video/zstr_x11sink.c
     src/plugins/video/zstr_text_overlay.c
     src/plugins/video/zstr_gl_comp.c
     src/plugins/streaming/zstr_net_source.c
@@ -234,6 +235,10 @@ if(BUILD_TESTS)
     add_executable(test_text_overlay tests/test_text_overlay.c)
     target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
     add_test(NAME test_text_overlay COMMAND test_text_overlay)
+
+    add_executable(test_x11sink tests/test_x11sink.c)
+    target_link_libraries(test_x11sink PRIVATE zff-plugins zff-core ${X11_LIBRARIES} ${SWSCALE_LIBRARIES})
+    add_test(NAME test_x11sink COMMAND test_x11sink)
 
     add_executable(test_gl_comp tests/test_gl_comp.c)
     target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)

@@ -78,6 +78,7 @@ Video (`src/plugins/video/`, `AVFrame` in/out):
 | `zstr_text_overlay` | `text_overlay.c` | FreeType OSD, timecode, PTS-window subtitles; fmts 420P/NV12/NV16/YUYV/RGB/BGR/RGBA/BGRA |
 | `zstr_glsink` | `gl_sink.c` | GLX zero-copy display; native YUV420P/NV12/RGB24 shaders, sws fallback rest |
 | `zstr_gl_comp` | `gl_comp_sink.c` | GPU multi-layer compositor (alpha/borders/layouts), sws input conversion |
+| `zstr_x11sink` | `x11_sink.c` | X11 software display; sws into XImage (TrueColor fast path), Expose re-blit |
 
 Streaming (`src/plugins/streaming/`, `AVPacket` in/out):
 | Plugin | From | Notes |
@@ -459,7 +460,7 @@ All elements migrated from `zstreamer` are named with the **`zstr_`** prefix and
 | **`zstr_glsink`** | Video Sink (`vsink_`) | `gl_sink.c` | **OpenGL/GLX zero-copy display**; GLSL YUV420P/NV12 ➔ RGB shader; Xvfb headless support | Takes `AVFrame` (CPU or DRM_PRIME) | `display`, `fullscreen`, `vsync`, `window_title` |
 | **`zstr_glcompositor`**| Video Filter (`vf_`) | `gl_comp_sink.c` | **GPU multi-channel compositor**; PiP, grid layouts, custom borders, alpha blending | Multi `AVFrame` ➔ Single `AVFrame` | `layout`, `background`, `border_width`, `border_color` |
 | **`zstr_ipp_comp`** | Video Filter (`vf_`) | `ipp_comp_sink.c` | **Intel IPP CPU compositor**; high-speed CPU multi-video mixing | Multi `AVFrame` ➔ Single `AVFrame` | `layout`, `threads` |
-| **`zstr_x11sink`** | Video Sink (`vsink_`) | `x11_sink.c` | **X11 MIT-SHM shared memory sink**; fast X11 rendering | Takes `AVFrame` | `display`, `window_id` |
+| **`zstr_x11sink`** | Video Sink (`vsink_`) | `x11_sink.c` | **X11 software display**; sws straight into XImage (TrueColor fast path, per-pixel fallback for exotic visuals); Expose re-blit; Xvfb-tested | Takes `AVFrame` | `display`, `window_title`, `is_mock` |
 
 ---
 
@@ -578,7 +579,12 @@ This document outlines the phased migration plan to freeze `zstreamer` and build
 # File: CMakeLists.txt
 ======================================================================
 cmake_minimum_required(VERSION 3.16)
-project(zff VERSION 1.0.0 LANGUAGES C)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" ZFF_VERSION)
+string(STRIP "${ZFF_VERSION}" ZFF_VERSION)
+if(NOT ZFF_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must use MAJOR.MINOR.PATCH; got '${ZFF_VERSION}'")
+endif()
+project(zff VERSION "${ZFF_VERSION}" LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -679,6 +685,7 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_alsa_sink.c
     src/plugins/audio/zstr_amix.c
     src/plugins/video/zstr_glsink.c
+    src/plugins/video/zstr_x11sink.c
     src/plugins/video/zstr_text_overlay.c
     src/plugins/video/zstr_gl_comp.c
     src/plugins/streaming/zstr_net_source.c
@@ -808,6 +815,10 @@ if(BUILD_TESTS)
     add_executable(test_text_overlay tests/test_text_overlay.c)
     target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
     add_test(NAME test_text_overlay COMMAND test_text_overlay)
+
+    add_executable(test_x11sink tests/test_x11sink.c)
+    target_link_libraries(test_x11sink PRIVATE zff-plugins zff-core ${X11_LIBRARIES} ${SWSCALE_LIBRARIES})
+    add_test(NAME test_x11sink COMMAND test_x11sink)
 
     add_executable(test_gl_comp tests/test_gl_comp.c)
     target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)
@@ -2452,6 +2463,48 @@ int zstr_whip_patch_candidate(const char *resource_url, const char *candidate);
 
 /* DELETE the WHIP resource (end session). Returns 0 on 2xx/404. */
 int zstr_whip_delete(const char *resource_url);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- File: include/zff/plugins/zstr_x11sink.h ---
+/*=============================================================================
+    zstr_x11sink.h — X11 Software Display Sink Device (AVOutputFormat)
+ =============================================================================*/
+#pragma once
+
+#include <libavformat/avformat.h>
+#include "zff/internal/zff_ffformat.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Standard FFmpeg FFOutputFormat device for zstr_x11sink.
+ *
+ * Software X11 display sink: any input AVPixelFormat is converted with
+ * sws_scale straight into the XImage (TrueColor 24/32-bit fast path;
+ * per-pixel fallback for exotic visuals) and shown with XPutImage.
+ * No display available (or "is_mock"=1) -> null mode: frames counted.
+ *
+ * Usage via standard FFmpeg API:
+ *   avformat_alloc_output_context2(&oc, zff_find_output_format("zstr_x11sink"),
+ *                                  NULL, "display");
+ *   // add one RAWVIDEO video stream ...
+ *   AVDictionary *opts = NULL;
+ *   av_dict_set(&opts, "display", ":0", 0);   // or rely on $DISPLAY
+ *   avformat_write_header(oc, &opts);
+ *   av_write_frame(oc, pkt);                  // pkt->data: packed frame
+ *   av_write_trailer(oc);
+ *
+ * Supported AVDictionary options:
+ *   - "display": string (default: $DISPLAY)
+ *   - "window_title": string
+ *   - "is_mock": bool
+ */
+extern const FFOutputFormat ff_zstr_x11sink_muxer;
 
 #ifdef __cplusplus
 }

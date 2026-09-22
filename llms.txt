@@ -75,6 +75,7 @@ Video (`src/plugins/video/`, `AVFrame` in/out):
 | `zstr_text_overlay` | `text_overlay.c` | FreeType OSD, timecode, PTS-window subtitles; fmts 420P/NV12/NV16/YUYV/RGB/BGR/RGBA/BGRA |
 | `zstr_glsink` | `gl_sink.c` | GLX zero-copy display; native YUV420P/NV12/RGB24 shaders, sws fallback rest |
 | `zstr_gl_comp` | `gl_comp_sink.c` | GPU multi-layer compositor (alpha/borders/layouts), sws input conversion |
+| `zstr_x11sink` | `x11_sink.c` | X11 software display; sws into XImage (TrueColor fast path), Expose re-blit |
 
 Streaming (`src/plugins/streaming/`, `AVPacket` in/out):
 | Plugin | From | Notes |

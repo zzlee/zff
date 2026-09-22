@@ -104,6 +104,7 @@ set(PLUGINS_SOURCES
     src/plugins/video/zstr_gl_comp.c
     src/plugins/streaming/zstr_net_source.c
     src/plugins/streaming/zstr_net_sink.c
+    src/plugins/streaming/zstr_hls_sink.c
     src/plugins/streaming/zstr_rtsp_server.c
     src/plugins/streaming/zstr_rtp_payloader.c
     src/plugins/streaming/zstr_rtp_depayloader.c
@@ -240,6 +241,10 @@ if(BUILD_TESTS)
     add_executable(test_rtp tests/test_rtp.c)
     target_link_libraries(test_rtp PRIVATE zff-plugins zff-core)
     add_test(NAME test_rtp COMMAND test_rtp)
+
+    add_executable(test_hls tests/test_hls.c)
+    target_link_libraries(test_hls PRIVATE zff-plugins zff-core)
+    add_test(NAME test_hls COMMAND test_hls)
 
     add_executable(test_rtsp_server tests/test_rtsp_server.c)
     target_link_libraries(test_rtsp_server PRIVATE zff-plugins zff-core pthread)

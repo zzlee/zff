@@ -186,11 +186,17 @@ typedef struct zstr_st2022_5_fec_decoder zstr_st2022_5_fec_decoder_t;
 typedef struct {
     int row_len;      /**< media packets per FEC packet, 2..24 (default 4) */
     uint8_t fec_pt;   /**< FEC payload type (default 127; 0 = decoder accepts any) */
+    int col_len;      /**< rows per matrix, 0/1 = row-only; needs (D-1)*L <= 23 */
 } zstr_st2022_5_config_t;
 
 zstr_st2022_5_fec_t *zstr_st2022_5_fec_create(const zstr_st2022_5_config_t *cfg);
-/* Returns an FEC AVPacket* when the row completes, else NULL. */
+/* Returns an FEC AVPacket* when the row completes, else NULL.
+ * Row-only API: with col_len > 0 use fec_encode_matrix for column cover. */
 AVPacket *zstr_st2022_5_fec_encode(zstr_st2022_5_fec_t *s, const AVPacket *media);
+/* Matrix API: collects every FEC packet emitted by this call (row and/or
+ * column) into a malloc'd array (caller frees packets + array). */
+int zstr_st2022_5_fec_encode_matrix(zstr_st2022_5_fec_t *s, const AVPacket *media,
+                                    AVPacket ***out_pkts, int *nb_out_pkts);
 void zstr_st2022_5_fec_free(zstr_st2022_5_fec_t **ps);
 
 zstr_st2022_5_fec_decoder_t *zstr_st2022_5_fec_decoder_create(

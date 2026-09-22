@@ -904,6 +904,121 @@ static void test_st2110_sdp_device_handoff(void)
     printf("[PASS] ST 2110 SDP device handoff passed.\n");
 }
 
+static void test_st2022_5_column_fec(void)
+{
+    printf("[TEST] Testing ST 2022-5 column FEC (2-D matrix)...\n");
+
+    /* L=4, D=3: 12 packets, seq 3000..3011, varying lengths */
+    zstr_st2022_5_fec_t *enc =
+        zstr_st2022_5_fec_create(&(zstr_st2022_5_config_t){
+            .row_len = 4, .fec_pt = 127, .col_len = 3 });
+    assert(enc != NULL);
+
+    AVPacket *media[12];
+    for (int i = 0; i < 12; i++) {
+        media[i] = av_packet_alloc();
+        int plen = 80 + (i % 3) * 10;
+        av_new_packet(media[i], 12 + plen);
+        uint8_t *d = media[i]->data;
+        d[0] = 0x80; d[1] = 96;
+        d[2] = (uint8_t)((3000 + i) >> 8); d[3] = (uint8_t)((3000 + i) & 0xFF);
+        memset(d + 4, 0, 8);
+        for (int k = 0; k < plen; k++) d[12 + k] = (uint8_t)(i * 7 + k);
+        media[i]->pts = 90000;
+        media[i]->time_base = (AVRational){ 1, 90000 };
+    }
+
+    AVPacket *fecs[16];
+    int nfec = 0;
+    for (int i = 0; i < 12; i++) {
+        AVPacket **arr = NULL;
+        int n = 0;
+        assert(zstr_st2022_5_fec_encode_matrix(enc, media[i], &arr, &n) == 0);
+        if (i < 3 || (i >= 4 && i < 7) || (i >= 8 && i < 11)) assert(n == 0);
+        if (i == 3 || i == 7) assert(n == 1); /* row FEC only */
+        if (i == 11) assert(n == 5);          /* row + 4 column FECs */
+        for (int k = 0; k < n; k++) fecs[nfec++] = arr[k];
+        free(arr);
+    }
+    assert(nfec == 7);
+
+    /* Column 1 FEC: base 3001, mask bits {1,5,9} */
+    bool found_col = false;
+    for (int i = 0; i < nfec; i++) {
+        uint16_t base = (fecs[i]->data[12] << 8) | fecs[i]->data[13];
+        uint32_t mask = ((uint32_t)fecs[i]->data[17] << 16) |
+                        ((uint32_t)fecs[i]->data[18] << 8) | fecs[i]->data[19];
+        if (base == 3001) {
+            assert(mask == ((1u << 1) | (1u << 5) | (1u << 9)));
+            found_col = true;
+        }
+    }
+    assert(found_col);
+
+    /* Drop two in row 0, distinct columns (3001=c1, 3002=c2):
+     * row 0 unrecoverable, both columns recover exactly one each. */
+    zstr_st2022_5_fec_decoder_t *dec =
+        zstr_st2022_5_fec_decoder_create(&(zstr_st2022_5_config_t){
+            .row_len = 4, .fec_pt = 127, .col_len = 3 }, 96);
+    assert(dec != NULL);
+    for (int i = 0; i < 12; i++) {
+        if (i == 1 || i == 2) continue; /* lose seq 3001, 3002 */
+        assert(zstr_st2022_5_fec_decoder_media(dec, media[i]) == 0);
+    }
+    AVPacket *rec1 = NULL, *rec2 = NULL;
+    for (int i = 0; i < nfec; i++) {
+        uint16_t fb = (fecs[i]->data[12] << 8) | fecs[i]->data[13];
+        uint32_t fm = ((uint32_t)fecs[i]->data[17] << 16) |
+                      ((uint32_t)fecs[i]->data[18] << 8) | fecs[i]->data[19];
+        AVPacket *r = zstr_st2022_5_fec_decoder_fec(dec, fecs[i]);
+        if (r) {
+            uint16_t sq = (r->data[2] << 8) | r->data[3];
+            if (sq == 3001) rec1 = r;
+            else if (sq == 3002) rec2 = r;
+            else av_packet_free(&r);
+        }
+    }
+    assert(rec1 != NULL && rec2 != NULL);
+    assert(rec1->size == media[1]->size);
+    assert(memcmp(rec1->data, media[1]->data, media[1]->size) == 0);
+    assert(rec2->size == media[2]->size);
+    assert(memcmp(rec2->data, media[2]->data, media[2]->size) == 0);
+    assert(zstr_st2022_5_fec_recovered(dec) == 2);
+    av_packet_free(&rec1);
+    av_packet_free(&rec2);
+    zstr_st2022_5_fec_decoder_free(&dec);
+
+    /* Single loss in matrix mode still recovers via row path */
+    dec = zstr_st2022_5_fec_decoder_create(&(zstr_st2022_5_config_t){
+        .row_len = 4, .fec_pt = 127, .col_len = 3 }, 96);
+    for (int i = 0; i < 12; i++) {
+        if (i == 6) continue; /* lose seq 3006 (row 1) */
+        assert(zstr_st2022_5_fec_decoder_media(dec, media[i]) == 0);
+    }
+    AVPacket *rec3 = NULL;
+    for (int i = 0; i < nfec; i++) {
+        AVPacket *r = zstr_st2022_5_fec_decoder_fec(dec, fecs[i]);
+        if (r) {
+            uint16_t sq = (r->data[2] << 8) | r->data[3];
+            /* Row and column paths can both fire for the same loss;
+             * keep the first, free any duplicate recovery. */
+            if (sq == 3006 && !rec3) rec3 = r;
+            else av_packet_free(&r);
+        }
+    }
+    assert(rec3 != NULL);
+    assert(rec3->size == media[6]->size);
+    assert(memcmp(rec3->data, media[6]->data, media[6]->size) == 0);
+    zstr_st2022_5_fec_decoder_free(&dec);
+    av_packet_free(&rec3);
+
+    for (int i = 0; i < 12; i++) av_packet_free(&media[i]);
+    for (int i = 0; i < nfec; i++) av_packet_free(&fecs[i]);
+    zstr_st2022_5_fec_free(&enc);
+
+    printf("[PASS] ST 2022-5 column FEC passed.\n");
+}
+
 static void test_st2110_device_loopback(void)
 {
     printf("[TEST] Testing ST 2110 FFmpeg Device Loopback (127.0.0.1:25000)...\n");
@@ -978,6 +1093,7 @@ int main(int argc, char **argv)
     test_st2110_40_anc_roundtrip();
     test_st2110_21_narrow_pacer();
     test_st2022_5_row_fec();
+    test_st2022_5_column_fec();
     test_st2110_22_rfc9134_roundtrip();
     test_st2110_22_encode_decode();
     test_st2110_device_loopback();

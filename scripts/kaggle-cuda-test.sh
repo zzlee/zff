@@ -60,6 +60,9 @@ if need_ffmpeg_build; then
     fi
     sudo mkdir -p "${FFMPEG_PREFIX}" /tmp/zffdeps
     sudo chown -R "$(id -u):$(id -g)" "${FFMPEG_PREFIX}" /tmp/zffdeps
+    # Export FIRST: ffmpeg's configure finds ffnvcodec.pc via pkg-config
+    export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
     cd /tmp/zffdeps
     if [ ! -d nv-codec-headers ]; then
         git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
@@ -80,8 +83,6 @@ if need_ffmpeg_build; then
         || { echo "FFmpeg build failed:"; tail -n 20 /tmp/zffdeps/ffbuild.log; exit 1; }
     make install > /tmp/zffdeps/ffinstall.log 2>&1
     cd "${WORKDIR:-/kaggle/working/zff}"
-    export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-    export LD_LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
     echo "    FFmpeg $(pkg-config --modversion libavutil) ready at ${FFMPEG_PREFIX}"
 fi
 

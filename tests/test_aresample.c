@@ -244,6 +244,31 @@ static void test_fractional_rate(void) {
            (long long)total, (long long)expect);
 }
 
+static void test_set_param_retarget(void) {
+    printf("[TEST] Runtime set_param retargets output rate...\n");
+
+    zstr_aresample_t *resampler = zstr_aresample_alloc("out_sample_rate=48000:out_channels=2:out_sample_fmt=s16");
+    assert(resampler != NULL);
+
+    AVFrame *in = alloc_test_audio_frame(44100, 2, AV_SAMPLE_FMT_S16, 1024, 0);
+    AVFrame *out = av_frame_alloc();
+    assert(zstr_aresample_process(resampler, in, out) == 0);
+    assert(out->sample_rate == 48000);
+    av_frame_unref(out);
+
+    /* Retarget mid-stream; takes effect on the very next process() */
+    assert(zstr_aresample_set_param(resampler, "out_sample_rate=44100") == 0);
+    assert(zstr_aresample_set_param(NULL, "out_sample_rate=44100") == AVERROR(EINVAL));
+    assert(zstr_aresample_process(resampler, in, out) == 0);
+    assert(out->sample_rate == 44100);
+    assert(out->ch_layout.nb_channels == 2); /* untouched params persist */
+
+    av_frame_free(&in);
+    av_frame_free(&out);
+    zstr_aresample_free(&resampler);
+    printf("[PASS] set_param retarget passed.\n");
+}
+
 int main(void) {
     printf("========================================\n");
     printf("   Running zstr_aresample Unit Tests    \n");
@@ -255,6 +280,7 @@ int main(void) {
     test_flush_drain();
     test_pts_precision();
     test_fractional_rate();
+    test_set_param_retarget();
 
     printf("========================================\n");
     printf("   All zstr_aresample Tests Passed!     \n");

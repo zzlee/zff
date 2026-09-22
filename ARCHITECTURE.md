@@ -29,6 +29,18 @@ In `zff`, all proprietary buffer structures (like legacy `zst_buffer_t`) are rep
 1. **Inside `AVFilter`s**: Video frames must be allocated via `ff_get_video_buffer(outlink, w, h)`, and audio frames via `ff_get_audio_buffer(outlink, nb_samples)`. This allows FFmpeg's internal buffer pool to recycle memory with zero allocation overhead in the hot loop.
 2. **Inside Custom Demuxers/Muxers**: Use `av_packet_alloc()` / `av_packet_free()`.
 
+### Engine Contract (out-of-tree ceiling)
+
+Out-of-tree `AVFilter`/`AVBitStreamFilter` implementation is impossible
+with distro libav* headers (opaque `AVFilterPad`, no formats constructors,
+no `filter()` callback), so all processing engines are C objects governed
+by `include/zff/zff_engine.h`: `alloc(opt_string)` or `create(cfg)` →
+`process*` → `flush` (stateful only) → `free(&ptr)`; inputs never consumed;
+errors are negative `AVERROR`; option strings are always `k=v:...`;
+runtime reconfiguration (where supported) is `set_param` effective on the
+next `process()`. The contract is written to survive a future in-tree
+FFmpeg port unchanged.
+
 ---
 
 ## 2. Proprietary Hardware Zero-Copy: NVIDIA `NvBufSurface` & Linux DMABUF

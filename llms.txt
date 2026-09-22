@@ -45,6 +45,11 @@ Tests: one `tests/test_<name>.c` per plugin, registered with `add_test`.
 - FFmpeg device pattern: C engine (`alloc/process/free`) + `FFOutputFormat` /
   `AVInputFormat` wrapper + `AVOption` table + registration in
   `src/plugins/zff_plugins.c`. Follow `zstr_net_sink.c` as the template.
+- Engine contract (`include/zff/zff_engine.h`): `free(&ptr)` NULLs the pointer;
+  `process` never consumes input; option strings are `k=v:...`; stateful
+  engines provide `flush()`; runtime reconfig (where supported) is `set_param`
+  effective next `process()`. New engines follow it; `alloc` = option-string
+  family, `create` = typed-config family.
 - Errors: negative `AVERROR(...)`; success 0. No custom result codes.
 - Hardware missing → constructor returns NULL + mock fallback (see
   `zstr_v4l2.c` `is_mock`), never `#error`.

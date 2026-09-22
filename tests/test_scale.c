@@ -221,6 +221,30 @@ static void test_scale_color_range_preserved(void) {
     printf("  -> OK (full=%d limited=%d)\n", r, r2);
 }
 
+static void test_scale_set_param(void) {
+    printf("[TEST] Runtime set_param retargets output geometry...\n");
+    zstr_scale_t *s = zstr_scale_alloc("w=320:h=240:format=yuv420p");
+    assert(s != NULL);
+
+    AVFrame *in = create_test_frame(640, 480, AV_PIX_FMT_YUV420P, 0);
+    AVFrame *out = av_frame_alloc();
+    assert(zstr_scale_process(s, in, out) == 0);
+    CHECK(out->width == 320 && out->height == 240);
+    av_frame_unref(out);
+
+    /* Retarget mid-stream; takes effect on the very next process() */
+    assert(zstr_scale_set_param(s, "w=160:h=120") == 0);
+    assert(zstr_scale_set_param(NULL, "w=160") == AVERROR(EINVAL));
+    assert(zstr_scale_process(s, in, out) == 0);
+    CHECK(out->width == 160 && out->height == 120);
+    CHECK(out->format == AV_PIX_FMT_YUV420P); /* untouched params persist */
+
+    av_frame_free(&in);
+    av_frame_free(&out);
+    zstr_scale_free(&s);
+    printf("  -> OK\n");
+}
+
 int main(void) {
     printf("=== Starting zstr_scale Unit Tests ===\n");
     test_scale_downscale_and_alignment();
@@ -229,6 +253,7 @@ int main(void) {
     test_scale_dynamic_reconfiguration();
     test_scale_side_data_propagation();
     test_scale_color_range_preserved();
+    test_scale_set_param();
     printf("=== All zstr_scale Tests PASSED ===\n");
     return 0;
 }

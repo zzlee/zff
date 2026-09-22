@@ -41,6 +41,40 @@ static int parse_scale_flags(const char *name) {
     return SWS_BILINEAR;
 }
 
+static int scale_parse_opts(zstr_scale_t *s, const char *opt_string) {
+    if (!s || !opt_string || opt_string[0] == '\0') return AVERROR(EINVAL);
+    char *copy = strdup(opt_string);
+    if (!copy) return AVERROR(ENOMEM);
+
+    char *token = strtok(copy, ":,");
+    while (token) {
+        char *eq = strchr(token, '=');
+        if (eq) {
+            *eq = '\0';
+            const char *key = token;
+            const char *val = eq + 1;
+
+            if (strcmp(key, "w") == 0 || strcmp(key, "width") == 0) {
+                s->target_width = atoi(val);
+            } else if (strcmp(key, "h") == 0 || strcmp(key, "height") == 0) {
+                s->target_height = atoi(val);
+            } else if (strcmp(key, "format") == 0 || strcmp(key, "pix_fmt") == 0) {
+                s->target_format = av_get_pix_fmt(val);
+            } else if (strcmp(key, "flags") == 0) {
+                s->flags = parse_scale_flags(val);
+            } else if (strcmp(key, "align") == 0) {
+                int a = atoi(val);
+                if (a > 0 && (a & (a - 1)) == 0) { /* Power of 2 */
+                    s->align = a;
+                }
+            }
+        }
+        token = strtok(NULL, ":,");
+    }
+    free(copy);
+    return 0;
+}
+
 zstr_scale_t* zstr_scale_alloc(const char *opt_string) {
     zstr_scale_t *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
@@ -52,38 +86,20 @@ zstr_scale_t* zstr_scale_alloc(const char *opt_string) {
     s->align = 64; /* 64-byte alignment for AVX-512 / AVX2 SIMD */
 
     if (opt_string && opt_string[0] != '\0') {
-        char *copy = strdup(opt_string);
-        if (copy) {
-            char *token = strtok(copy, ":,");
-            while (token) {
-                char *eq = strchr(token, '=');
-                if (eq) {
-                    *eq = '\0';
-                    const char *key = token;
-                    const char *val = eq + 1;
-
-                    if (strcmp(key, "w") == 0 || strcmp(key, "width") == 0) {
-                        s->target_width = atoi(val);
-                    } else if (strcmp(key, "h") == 0 || strcmp(key, "height") == 0) {
-                        s->target_height = atoi(val);
-                    } else if (strcmp(key, "format") == 0 || strcmp(key, "pix_fmt") == 0) {
-                        s->target_format = av_get_pix_fmt(val);
-                    } else if (strcmp(key, "flags") == 0) {
-                        s->flags = parse_scale_flags(val);
-                    } else if (strcmp(key, "align") == 0) {
-                        int a = atoi(val);
-                        if (a > 0 && (a & (a - 1)) == 0) { /* Power of 2 */
-                            s->align = a;
-                        }
-                    }
-                }
-                token = strtok(NULL, ":,");
-            }
-            free(copy);
+        if (scale_parse_opts(s, opt_string) < 0) {
+            free(s);
+            return NULL;
         }
     }
 
     return s;
+}
+
+/* Runtime reconfiguration (engine contract set_param): new targets take
+ * effect on the next process() via the rebuild check. */
+int zstr_scale_set_param(zstr_scale_t *s, const char *param_str) {
+    if (!s) return AVERROR(EINVAL);
+    return scale_parse_opts(s, param_str);
 }
 
 int zstr_scale_process(zstr_scale_t *s, const AVFrame *in, AVFrame *out) {

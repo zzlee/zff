@@ -51,6 +51,12 @@ zstr_aresample_t* zstr_aresample_alloc(const char *opt_string);
 int zstr_aresample_process(zstr_aresample_t *s, const AVFrame *in, AVFrame *out);
 
 /**
+ * Runtime reconfiguration (engine contract set_param, see zff_engine.h).
+ * Output geometry changes take effect on the next process() call.
+ */
+int zstr_aresample_set_param(zstr_aresample_t *s, const char *param_str);
+
+/**
  * Drain samples buffered inside swr (filter delay + compensation tail).
  * Output pts continues seamlessly from the last process() call.
  * Emits at most one frame per call; call repeatedly until

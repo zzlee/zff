@@ -48,6 +48,12 @@ zstr_scale_t* zstr_scale_alloc(const char *opt_string);
 int zstr_scale_process(zstr_scale_t *s, const AVFrame *in, AVFrame *out);
 
 /**
+ * Runtime reconfiguration (engine contract set_param, see zff_engine.h).
+ * New targets take effect on the next process() call.
+ */
+int zstr_scale_set_param(zstr_scale_t *s, const char *param_str);
+
+/**
  * Free zstr_scale instance and underlying SwsContext.
  */
 void zstr_scale_free(zstr_scale_t **s);

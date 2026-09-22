@@ -33,6 +33,11 @@ struct zstr_aresample {
     int cur_in_rate;
     AVChannelLayout cur_in_ch_layout;
     enum AVSampleFormat cur_in_fmt;
+    /* Output parameters actually programmed at last reinit (reinit when
+     * the live options drift from these, e.g. via set_param) */
+    int applied_out_rate;
+    enum AVSampleFormat applied_out_fmt;
+    AVChannelLayout applied_out_ch_layout;
     int swr_out_rate;      /* integer rate actually programmed into swr
                               (may be nudged +1 or rounded from fractional) */
     int comp_delta;        /* fractional-rate compensation delta (0 = none) */
@@ -125,6 +130,13 @@ static int reinit_swr(zstr_aresample_t *s, const AVFrame *in) {
     if (ret < 0 || !s->swr) return ret < 0 ? ret : AVERROR(ENOMEM);
 
     ret = swr_init(s->swr);
+    if (ret < 0) return ret;
+
+    /* Snapshot the programmed output geometry */
+    s->applied_out_rate = s->out_sample_rate;
+    s->applied_out_fmt = s->out_sample_fmt;
+    av_channel_layout_uninit(&s->applied_out_ch_layout);
+    av_channel_layout_copy(&s->applied_out_ch_layout, &s->out_ch_layout);
     return ret;
 }
 
@@ -190,14 +202,28 @@ zstr_aresample_t* zstr_aresample_alloc(const char *opt_string) {
     return s;
 }
 
+/* Runtime reconfiguration (engine contract set_param): option changes
+ * take effect on the next process() via the applied-geometry check. */
+int zstr_aresample_set_param(zstr_aresample_t *s, const char *param_str) {
+    if (!s || !param_str || !*param_str) return AVERROR(EINVAL);
+    if (av_set_options_string(s, param_str, "=", ":") < 0) return AVERROR(EINVAL);
+    av_channel_layout_uninit(&s->out_ch_layout);
+    av_channel_layout_default(&s->out_ch_layout, s->out_channels);
+    return 0;
+}
+
 int zstr_aresample_process(zstr_aresample_t *s, const AVFrame *in, AVFrame *out) {
     if (!s || !in || !out) return AVERROR(EINVAL);
 
-    /* Check for dynamic format changes on input */
+    /* Check for dynamic format changes on input, or output geometry
+     * changes via set_param */
     if (!s->swr ||
         s->cur_in_rate != in->sample_rate ||
         s->cur_in_fmt != in->format ||
-        av_channel_layout_compare(&s->cur_in_ch_layout, &in->ch_layout) != 0) {
+        av_channel_layout_compare(&s->cur_in_ch_layout, &in->ch_layout) != 0 ||
+        s->applied_out_rate != s->out_sample_rate ||
+        s->applied_out_fmt != s->out_sample_fmt ||
+        av_channel_layout_compare(&s->applied_out_ch_layout, &s->out_ch_layout) != 0) {
 
         int ret = reinit_swr(s, in);
         if (ret < 0) return ret;
@@ -321,6 +347,7 @@ void zstr_aresample_free(zstr_aresample_t **s) {
         }
         av_channel_layout_uninit(&(*s)->out_ch_layout);
         av_channel_layout_uninit(&(*s)->cur_in_ch_layout);
+        av_channel_layout_uninit(&(*s)->applied_out_ch_layout);
         av_freep(s);
     }
 }

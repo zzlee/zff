@@ -48,6 +48,11 @@ Tests: one `tests/test_<name>.c` per plugin, registered with `add_test`.
 - FFmpeg device pattern: C engine (`alloc/process/free`) + `FFOutputFormat` /
   `AVInputFormat` wrapper + `AVOption` table + registration in
   `src/plugins/zff_plugins.c`. Follow `zstr_net_sink.c` as the template.
+- Engine contract (`include/zff/zff_engine.h`): `free(&ptr)` NULLs the pointer;
+  `process` never consumes input; option strings are `k=v:...`; stateful
+  engines provide `flush()`; runtime reconfig (where supported) is `set_param`
+  effective next `process()`. New engines follow it; `alloc` = option-string
+  family, `create` = typed-config family.
 - Errors: negative `AVERROR(...)`; success 0. No custom result codes.
 - Hardware missing → constructor returns NULL + mock fallback (see
   `zstr_v4l2.c` `is_mock`), never `#error`.
@@ -299,6 +304,18 @@ In `zff`, all proprietary buffer structures (like legacy `zst_buffer_t`) are rep
 ### Allocation Rules:
 1. **Inside `AVFilter`s**: Video frames must be allocated via `ff_get_video_buffer(outlink, w, h)`, and audio frames via `ff_get_audio_buffer(outlink, nb_samples)`. This allows FFmpeg's internal buffer pool to recycle memory with zero allocation overhead in the hot loop.
 2. **Inside Custom Demuxers/Muxers**: Use `av_packet_alloc()` / `av_packet_free()`.
+
+### Engine Contract (out-of-tree ceiling)
+
+Out-of-tree `AVFilter`/`AVBitStreamFilter` implementation is impossible
+with distro libav* headers (opaque `AVFilterPad`, no formats constructors,
+no `filter()` callback), so all processing engines are C objects governed
+by `include/zff/zff_engine.h`: `alloc(opt_string)` or `create(cfg)` →
+`process*` → `flush` (stateful only) → `free(&ptr)`; inputs never consumed;
+errors are negative `AVERROR`; option strings are always `k=v:...`;
+runtime reconfiguration (where supported) is `set_param` effective on the
+next `process()`. The contract is written to survive a future in-tree
+FFmpeg port unchanged.
 
 ---
 
@@ -1162,6 +1179,12 @@ zstr_aresample_t* zstr_aresample_alloc(const char *opt_string);
 int zstr_aresample_process(zstr_aresample_t *s, const AVFrame *in, AVFrame *out);
 
 /**
+ * Runtime reconfiguration (engine contract set_param, see zff_engine.h).
+ * Output geometry changes take effect on the next process() call.
+ */
+int zstr_aresample_set_param(zstr_aresample_t *s, const char *param_str);
+
+/**
  * Drain samples buffered inside swr (filter delay + compensation tail).
  * Output pts continues seamlessly from the last process() call.
  * Emits at most one frame per call; call repeatedly until
@@ -1648,6 +1671,12 @@ zstr_scale_t* zstr_scale_alloc(const char *opt_string);
 int zstr_scale_process(zstr_scale_t *s, const AVFrame *in, AVFrame *out);
 
 /**
+ * Runtime reconfiguration (engine contract set_param, see zff_engine.h).
+ * New targets take effect on the next process() call.
+ */
+int zstr_scale_set_param(zstr_scale_t *s, const char *param_str);
+
+/**
  * Free zstr_scale instance and underlying SwsContext.
  */
 void zstr_scale_free(zstr_scale_t **s);
@@ -1864,6 +1893,8 @@ extern "C" {
  * Supported AVDictionary options:
  *   - "host": string (Bind IP address)
  *   - "port": int (Bind UDP port)
+ *   - "sdp_file": string (ST 2110 SDP path; when present, the session
+ *     address/port and video/audio stream geometry come from the file)
  */
 extern const AVInputFormat ff_zstr_st2110_demuxer;
 
@@ -1881,6 +1912,7 @@ extern const AVInputFormat ff_zstr_st2110_demuxer;
  *   - "host": string (Destination IP address)
  *   - "port": int (Destination UDP port)
  *   - "pt": int (RTP Payload Type: 96 for video, 97 for audio)
+ *   - "sdp_file": string (write an ST 2110 SDP describing this sender)
  */
 extern const FFOutputFormat ff_zstr_st2110_muxer;
 
@@ -2711,6 +2743,80 @@ int zff_register_output_format(const AVOutputFormat *fmt);
  * and falls back to standard FFmpeg av_guess_format().
  */
 const AVOutputFormat* zff_find_output_format(const char *name);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- File: include/zff/zff_engine.h ---
+/*=============================================================================
+    zff_engine.h — Unified Filter Engine Contract (zff)
+
+    Every zff processing engine follows this contract so that all engines
+    are constructed, driven, and torn down the same way, whether they are
+    frame engines (AVFrame in/out), packet engines (AVPacket in/out), or
+    converters. Engines are deliberately NOT AVFilters: out-of-tree
+    AVFilter/AVBitStreamFilter implementation is impossible with distro
+    libav* headers (opaque AVFilterPad, no formats constructors, no
+    filter() callback) — see llms.txt. This contract is the out-of-tree
+    ceiling, kept compatible with a future in-tree FFmpeg port.
+
+    1. LIFECYCLE
+       alloc/create -> process* -> flush (if stateful) -> free(&ptr).
+       free() takes a pointer-to-pointer, NULLs it, and tolerates NULL.
+
+    2. CONSTRUCTION (two families, chosen by parameter shape)
+       - alloc(opt_string): engines configured by key=value pairs, e.g.
+           zstr_aresample_alloc("out_sample_rate=48000:asrc_mode=pts").
+         opt_string may be NULL (= defaults).
+       - create(cfg): converters taking a typed C struct, e.g.
+           zstr_rtp_payloader_create(ZSTR_RTP_CODEC_H264, 96, ...).
+         Both return NULL on failure (no partial objects, no errno codes).
+
+    3. OPTION SYNTAX
+       The string form is always "k=v:k2=v2" (',' also accepted). Engines
+       SHOULD use libavutil AVOption; engines with indexed/per-item syntax
+       (e.g. amix "volume@0=0.5") may hand-parse but MUST keep the syntax.
+
+    4. PROCESS RULES
+       - Never consume, free, or modify the input object.
+       - Frame engines: the caller passes an empty output AVFrame; the
+         engine sizes it and allocates its buffers (av_frame_get_buffer).
+         Exception: verified zero-copy passthrough may av_frame_ref.
+       - Packet engines that fan out (payloaders, mux-duplicators):
+           process(s, in, &array_out, &nb_out); caller frees via the
+         family free_packets() helper.
+       - Packet engines that reassemble (depayloders):
+           process(s, in, caller_out, &ready); ready=false means "feed me
+         more", and caller_out is untouched in that case.
+       - One-shot converters (encode/decode): process-style verbs with
+         explicit input/output ownership in their doc comments.
+
+    5. ERRORS: 0 on success, negative AVERROR on failure. No custom codes.
+
+    6. FLUSH: stateful engines (delay lines, e.g. resamplers) MUST provide
+       flush(); stateless engines omit it.
+
+    7. SET_PARAM (optional): engines that support runtime reconfiguration
+       declare set_param(s, "k=v:..."); a successful call takes effect on
+       the NEXT process() call at the latest. Engines without it are
+       configured once at alloc/create.
+
+    8. THREADING: an instance is driven by one thread at a time; concurrent
+       process() on the same instance is undefined unless documented.
+
+    9. TIMESTAMPS: each engine documents its PTS convention in its header
+       (stream time_base vs nanoseconds); the contract requires the
+       documentation, not a single convention.
+ =============================================================================*/
+#pragma once
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Engine contract version (bump on incompatible contract change). */
+#define ZSTR_ENGINE_CONTRACT_VERSION 1
 
 #ifdef __cplusplus
 }

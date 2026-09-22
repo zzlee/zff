@@ -1230,6 +1230,172 @@ static void test_st2022_5_column_fec(void)
     printf("[PASS] ST 2022-5 column FEC passed.\n");
 }
 
+static void test_st2110_21_wide_pacer(void)
+{
+    printf("[TEST] Testing ST 2110-21 Wide sender pacer...\n");
+
+    /* 10 packets at 60 fps: interval ~1.67ms */
+    zstr_st2110_21_pacer_t *pacer =
+        zstr_st2110_21_pacer_create(&(zstr_st2110_21_config_t){
+            .width = 320, .height = 240, .fps_num = 60, .fps_den = 1,
+            .pacer_type = 1 });
+    assert(pacer != NULL);
+    assert(zstr_st2110_21_frame_start(pacer, 100000, 10) == 0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0); /* p0 immediate */
+
+    /* Sleep ~3 slots: p1..p3 go immediately (catch-up burst, no rebase) */
+    struct timespec sl = { 0, 5 * 1000 * 1000 };
+    nanosleep(&sl, NULL);
+    struct timespec b0, b1;
+    clock_gettime(CLOCK_MONOTONIC, &b0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &b1);
+    int64_t burst_dt = (b1.tv_sec - b0.tv_sec) * 1000000000LL +
+                       (b1.tv_nsec - b0.tv_nsec);
+    assert(burst_dt < 3000000LL); /* three immediates, no sleeping */
+    assert(zstr_st2110_21_late_count(pacer) == 3);
+
+    /* p4's slot on the ORIGINAL schedule is still in the future: it sleeps,
+     * proving Wide preserved the schedule instead of rebasing. */
+    clock_gettime(CLOCK_MONOTONIC, &b0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &b1);
+    int64_t sleep_dt = (b1.tv_sec - b0.tv_sec) * 1000000000LL +
+                       (b1.tv_nsec - b0.tv_nsec);
+    assert(sleep_dt >= 500000LL); /* slept for its slot */
+    assert(sleep_dt <= 15000000LL);
+    zstr_st2110_21_pacer_free(&pacer);
+
+    /* cmax cap: cmax=2 allows 2 immediates, then forces rebase */
+    pacer = zstr_st2110_21_pacer_create(&(zstr_st2110_21_config_t){
+        .fps_num = 60, .fps_den = 1, .pacer_type = 1, .cmax = 2 });
+    assert(pacer != NULL);
+    assert(zstr_st2110_21_frame_start(pacer, 200000, 10) == 0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    sl.tv_nsec = 10 * 1000 * 1000; /* ~6 slots behind */
+    nanosleep(&sl, NULL);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0); /* run=1 */
+    assert(zstr_st2110_21_wait_packet(pacer) == 0); /* run=2 = cmax */
+    assert(zstr_st2110_21_late_count(pacer) == 2);
+    /* Next miss hits the cap: rebase (immediate), and the packet after
+     * that sleeps a full slot on the fresh schedule. */
+    clock_gettime(CLOCK_MONOTONIC, &b0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0); /* rebase, immediate */
+    assert(zstr_st2110_21_wait_packet(pacer) == 0); /* sleeps */
+    clock_gettime(CLOCK_MONOTONIC, &b1);
+    sleep_dt = (b1.tv_sec - b0.tv_sec) * 1000000000LL +
+               (b1.tv_nsec - b0.tv_nsec);
+    assert(sleep_dt >= 500000LL);
+    assert(zstr_st2110_21_late_count(pacer) == 3);
+    zstr_st2110_21_pacer_free(&pacer);
+
+    printf("[PASS] ST 2110-21 Wide pacer passed.\n");
+}
+
+static void test_st2110_21_monitor(void)
+{
+    printf("[TEST] Testing ST 2110-21 receiver monitor...\n");
+
+    /* Perfect linear sender: 30 packets, 10/frame @60fps */
+    zstr_st2110_21_monitor_t *mon =
+        zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+            .packets_per_frame = 10, .fps_num = 60, .fps_den = 1 });
+    assert(mon != NULL);
+    int64_t interval = (int64_t)1000000000 / 60 / 10;
+    int64_t t0 = 100000000000LL;
+    for (int k = 0; k < 30; k++)
+        assert(zstr_st2110_21_monitor_packet(mon, (uint16_t)(500 + k),
+                                             t0 + (int64_t)k * interval) == 0);
+    zstr_st2110_21_report_t rep;
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.total == 30);
+    assert(rep.overflows == 0);
+    assert(rep.late_count == 0);
+    assert(rep.max_burst == 1);
+    assert(rep.max_vrx_occ <= 2.0);
+    assert(rep.compliant);
+    zstr_st2110_21_monitor_free(&mon);
+
+    /* Burst of 8: Narrow thresholds (cmax 4) fail, Wide (cmax 16) pass */
+    mon = zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+        .packets_per_frame = 10, .fps_num = 60, .fps_den = 1,
+        .cmax_limit = 4 });
+    for (int k = 0; k < 8; k++)
+        assert(zstr_st2110_21_monitor_packet(mon, (uint16_t)(100 + k), t0) == 0);
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.max_burst == 8);
+    assert(!rep.compliant); /* burst exceeds Narrow-style limit */
+    zstr_st2110_21_monitor_free(&mon);
+
+    mon = zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+        .packets_per_frame = 10, .fps_num = 60, .fps_den = 1,
+        .cmax_limit = 16 });
+    for (int k = 0; k < 8; k++)
+        assert(zstr_st2110_21_monitor_packet(mon, (uint16_t)(100 + k), t0) == 0);
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.compliant); /* same burst fits Wide-style budget */
+    zstr_st2110_21_monitor_free(&mon);
+
+    /* Delayed packets: seq 5,6 arrive 3 intervals late */
+    mon = zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+        .packets_per_frame = 10, .fps_num = 60, .fps_den = 1 });
+    for (int k = 0; k < 12; k++) {
+        int64_t at = t0 + (int64_t)k * interval;
+        if (k == 5 || k == 6) at += 3 * interval;
+        assert(zstr_st2110_21_monitor_packet(mon, (uint16_t)(200 + k), at) == 0);
+    }
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.late_count == 2);
+    assert(rep.max_late_ns >= 3 * interval);
+    assert(!rep.compliant); /* beyond the 2-interval late limit */
+    zstr_st2110_21_monitor_free(&mon);
+
+    /* Sequence wraparound stays clean */
+    mon = zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+        .packets_per_frame = 10, .fps_num = 60, .fps_den = 1 });
+    for (int k = 0; k < 4; k++) {
+        uint16_t sq = (uint16_t)(65534 + k);
+        assert(zstr_st2110_21_monitor_packet(mon, sq, t0 + (int64_t)k * interval) == 0);
+    }
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.total == 4 && rep.late_count == 0 && rep.compliant);
+    zstr_st2110_21_monitor_free(&mon);
+
+    printf("[PASS] ST 2110-21 monitor passed.\n");
+}
+
+static void test_st2110_21_pacer_monitor_loopback(void)
+{
+    printf("[TEST] Testing Narrow pacer -> monitor loopback...\n");
+
+    zstr_st2110_21_pacer_t *pacer =
+        zstr_st2110_21_pacer_create(&(zstr_st2110_21_config_t){
+            .fps_num = 60, .fps_den = 1, .pacer_type = 0 });
+    zstr_st2110_21_monitor_t *mon =
+        zstr_st2110_21_monitor_create(&(zstr_st2110_21_monitor_config_t){
+            .packets_per_frame = 10, .fps_num = 60, .fps_den = 1 });
+    assert(pacer != NULL && mon != NULL);
+    assert(zstr_st2110_21_frame_start(pacer, 400000, 10) == 0);
+
+    struct timespec ts;
+    for (int i = 0; i < 10; i++) {
+        assert(zstr_st2110_21_wait_packet(pacer) == 0);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        assert(zstr_st2110_21_monitor_packet(mon, (uint16_t)(1000 + i), now) == 0);
+    }
+    zstr_st2110_21_report_t rep;
+    assert(zstr_st2110_21_monitor_check(mon, &rep) == 0);
+    assert(rep.total == 10);
+    assert(rep.compliant);
+    zstr_st2110_21_pacer_free(&pacer);
+    zstr_st2110_21_monitor_free(&mon);
+
+    printf("[PASS] Pacer/monitor loopback passed.\n");
+}
+
 static void test_st2110_device_loopback(void)
 {
     printf("[TEST] Testing ST 2110 FFmpeg Device Loopback (127.0.0.1:25000)...\n");
@@ -1303,6 +1469,9 @@ int main(int argc, char **argv)
     test_st2110_sdp_device_handoff();
     test_st2110_40_anc_roundtrip();
     test_st2110_21_narrow_pacer();
+    test_st2110_21_wide_pacer();
+    test_st2110_21_monitor();
+    test_st2110_21_pacer_monitor_loopback();
     test_st2022_5_row_fec();
     test_st2022_5_column_fec();
     test_st2110_22_rfc9134_roundtrip();

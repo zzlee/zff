@@ -110,7 +110,8 @@ typedef struct {
     int height;      /**< default 1080 */
     int fps_num;     /**< default 60000 */
     int fps_den;     /**< default 1001 */
-    int pacer_type;  /**< 0 = Narrow linear (only profile in v1) */
+    int pacer_type;  /**< 0 = Narrow linear, 1 = Wide burst-tolerant */
+    int cmax;        /**< Wide: max consecutive immediate sends (default 16) */
 } zstr_st2110_21_config_t;
 
 zstr_st2110_21_pacer_t *zstr_st2110_21_pacer_create(
@@ -125,6 +126,42 @@ uint64_t zstr_st2110_21_late_count(const zstr_st2110_21_pacer_t *s);
 /** Current per-packet interval in ns (diagnostics). */
 int64_t zstr_st2110_21_packet_interval_ns(const zstr_st2110_21_pacer_t *s);
 void zstr_st2110_21_pacer_free(zstr_st2110_21_pacer_t **ps);
+
+/* ---------------------------------------------------------------------------
+ * ST 2110-21: Receiver compliance monitor (VRX / CMAX / lateness)
+ *
+ * Thresholds are zff measurement defaults, NOT SMPTE certification values.
+ * --------------------------------------------------------------------------- */
+typedef struct zstr_st2110_21_monitor zstr_st2110_21_monitor_t;
+
+typedef struct {
+    int packets_per_frame; /**< default 100 */
+    int fps_num;           /**< default 60000 */
+    int fps_den;           /**< default 1001 */
+    int vrx_full;          /**< VRX overflow level in packets (default 16) */
+    int cmax_limit;        /**< max tolerated burst run (default 8) */
+    int64_t late_limit_ns; /**< max tolerated lateness (default 2 intervals) */
+} zstr_st2110_21_monitor_config_t;
+
+typedef struct {
+    double max_vrx_occ;
+    uint64_t overflows;
+    int max_burst;
+    int64_t max_late_ns;
+    uint64_t late_count;
+    uint64_t total;
+    bool compliant;
+} zstr_st2110_21_report_t;
+
+zstr_st2110_21_monitor_t *zstr_st2110_21_monitor_create(
+    const zstr_st2110_21_monitor_config_t *cfg);
+/** Feed one arrival (16-bit RTP seq, CLOCK_MONOTONIC ns). */
+int zstr_st2110_21_monitor_packet(zstr_st2110_21_monitor_t *s, uint16_t seq,
+                                  int64_t arrival_ns);
+/** Snapshot measurements + threshold verdict. */
+int zstr_st2110_21_monitor_check(const zstr_st2110_21_monitor_t *s,
+                                 zstr_st2110_21_report_t *report);
+void zstr_st2110_21_monitor_free(zstr_st2110_21_monitor_t **ps);
 
 /* ---------------------------------------------------------------------------
  * ST 2110-22: JPEG XS encode + RFC 9134 packetization + decode

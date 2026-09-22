@@ -180,3 +180,4 @@ hardware bridges. See `PORTING_ANALYSIS.md` in the workspace (not the repo).
 - `ELEMENTS.md` — full element→plugin mapping
 - `ROADMAP.md` — phased migration plan
 - `examples/webrtc_page/` — browser publishing demo (C + HTML/JS)
+- `docs/KAGGLE_CUDA.md` — free-GPU CUDA test runbook (notebook + full CLI)

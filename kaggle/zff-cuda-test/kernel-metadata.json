@@ -1,0 +1,10 @@
+{
+  "id": "__KAGGLE_USER__/zff-cuda-test",
+  "title": "zff CUDA integration test",
+  "code_file": "test_cuda.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true
+}

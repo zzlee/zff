@@ -106,3 +106,4 @@ int main() {
 - [Architecture & Design Details](ARCHITECTURE.md) — Buffer models, zero-copy, SideData, and dataflow.
 - [Complete Elements Inventory](ELEMENTS.md) — All 101+ elements mapped to `zstr_xxxx` plugins.
 - [Roadmap & Migration Plan](ROADMAP.md) — Step-by-step engineering schedule.
+- [Kaggle CUDA Runbook](docs/KAGGLE_CUDA.md) — free-GPU video codec testing.

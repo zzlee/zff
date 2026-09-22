@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavformat/avformat.h>
@@ -207,6 +208,434 @@ static void test_st2022_7_redundancy(void)
     printf("[PASS] SMPTE ST 2022-7 Hitless Redundancy passed.\n");
 }
 
+static void test_st2110_40_anc_roundtrip(void)
+{
+    printf("[TEST] Testing ST 2110-40 ANC payloader & depayloader...\n");
+
+    zstr_st2110_40_payloader_t *pay =
+        zstr_st2110_40_payloader_create(&(zstr_st2110_40_config_t){
+            .payload_type = 100, .ssrc = 0x21104001, .mtu = 1400 });
+    zstr_st2110_40_depayloader_t *depay =
+        zstr_st2110_40_depayloader_create(&(zstr_st2110_40_config_t){
+            .payload_type = 100 });
+    assert(pay != NULL && depay != NULL);
+
+    /* Build two ANC packets: CEA-608 (DID 0x61) + OP-47 (DID 0x43) */
+    uint8_t anc[64];
+    int pos = 0;
+    /* pkt1: DID=0x61 SDID=0x01 DC=3 UDW + CS */
+    anc[pos++] = 0x61; anc[pos++] = 0x01; anc[pos++] = 3;
+    anc[pos++] = 0x10; anc[pos++] = 0x20; anc[pos++] = 0x30;
+    anc[pos++] = (uint8_t)((0x61 + 0x01 + 3 + 0x10 + 0x20 + 0x30) & 0xFF);
+    /* pkt2: DID=0x43 SDID=0x02 DC=2 UDW + CS */
+    anc[pos++] = 0x43; anc[pos++] = 0x02; anc[pos++] = 2;
+    anc[pos++] = 0xAA; anc[pos++] = 0xBB;
+    anc[pos++] = (uint8_t)((0x43 + 0x02 + 2 + 0xAA + 0xBB) & 0xFF);
+    int anc_len = pos;
+
+    AVPacket *in_pkt = av_packet_alloc();
+    av_new_packet(in_pkt, anc_len);
+    memcpy(in_pkt->data, anc, anc_len);
+    in_pkt->pts = 180000;
+    in_pkt->time_base = (AVRational){ 1, 90000 };
+
+    AVPacket **rtp_pkts = NULL;
+    int nb_pkts = 0;
+    int ret = zstr_st2110_40_payloader_process(pay, in_pkt, &rtp_pkts, &nb_pkts);
+    assert(ret == 0);
+    assert(nb_pkts == 1); /* fits in one MTU */
+    assert(rtp_pkts[0]->size == 12 + anc_len);
+    assert((rtp_pkts[0]->data[1] & 0x7F) == 100);
+    assert((rtp_pkts[0]->data[1] & 0x80) != 0); /* marker on last */
+    uint32_t ts = ((uint32_t)rtp_pkts[0]->data[4] << 24) |
+                  ((uint32_t)rtp_pkts[0]->data[5] << 16) |
+                  ((uint32_t)rtp_pkts[0]->data[6] << 8) |
+                  rtp_pkts[0]->data[7];
+    assert(ts == 180000);
+
+    AVPacket *out_pkt = av_packet_alloc();
+    bool ready = false;
+    ret = zstr_st2110_40_depayloader_process(depay, rtp_pkts[0], out_pkt, &ready);
+    assert(ret == 0);
+    assert(ready == true);
+    assert(out_pkt->size == anc_len);
+    assert(memcmp(out_pkt->data, anc, anc_len) == 0);
+
+    zstr_st2110_40_payloader_free_packets(rtp_pkts, nb_pkts);
+    av_packet_free(&in_pkt);
+    av_packet_free(&out_pkt);
+
+    /* Multi-packet fragmentation with tiny MTU + corrupt tail rejection */
+    zstr_st2110_40_payloader_t *pay2 =
+        zstr_st2110_40_payloader_create(&(zstr_st2110_40_config_t){
+            .payload_type = 100, .ssrc = 0x21104002, .mtu = 64 });
+    uint8_t big[200];
+    for (int i = 0; i < 200; i++) big[i] = (uint8_t)i;
+    /* Make it valid ANC framing: chain of DC=... use DID=0x61 DC=60 chunks */
+    int bp = 0;
+    while (bp + 64 <= 200) {
+        big[bp++] = 0x61; big[bp++] = 0x01; big[bp++] = 60;
+        bp += 60;
+        big[bp++] = 0x00; /* CS placeholder */
+    }
+    AVPacket *big_pkt = av_packet_alloc();
+    av_new_packet(big_pkt, bp);
+    memcpy(big_pkt->data, big, bp);
+    big_pkt->pts = 270000;
+    big_pkt->time_base = (AVRational){ 1, 90000 };
+
+    rtp_pkts = NULL;
+    nb_pkts = 0;
+    ret = zstr_st2110_40_payloader_process(pay2, big_pkt, &rtp_pkts, &nb_pkts);
+    assert(ret == 0);
+    assert(nb_pkts > 1);
+    for (int i = 0; i < nb_pkts; i++) {
+        bool m = (rtp_pkts[i]->data[1] & 0x80) != 0;
+        assert(m == (i == nb_pkts - 1)); /* marker only on last */
+    }
+
+    out_pkt = av_packet_alloc();
+    ready = false;
+    for (int i = 0; i < nb_pkts; i++) {
+        ret = zstr_st2110_40_depayloader_process(depay, rtp_pkts[i], out_pkt, &ready);
+        assert(ret == 0);
+        assert(ready == (i == nb_pkts - 1));
+    }
+    assert(ready == true);
+    assert(out_pkt->size == bp);
+    assert(memcmp(out_pkt->data, big, bp) == 0);
+
+    /* Corrupt: truncated final packet must be rejected */
+    AVPacket *bad = av_packet_alloc();
+    av_new_packet(bad, 12 + 3);
+    memcpy(bad->data, rtp_pkts[nb_pkts - 1]->data, 12);
+    bad->data[1] |= 0x80;
+    bad->data[12] = 0x61; bad->data[13] = 0x01; bad->data[14] = 60; /* claims 60, has 0 */
+    ret = zstr_st2110_40_depayloader_process(depay, bad, out_pkt, &ready);
+    assert(ret < 0);
+    assert(ready == false);
+
+    zstr_st2110_40_payloader_free_packets(rtp_pkts, nb_pkts);
+    av_packet_free(&big_pkt);
+    av_packet_free(&out_pkt);
+    av_packet_free(&bad);
+    zstr_st2110_40_payloader_free(&pay);
+    zstr_st2110_40_payloader_free(&pay2);
+    zstr_st2110_40_depayloader_free(&depay);
+
+    printf("[PASS] ST 2110-40 ANC roundtrip passed.\n");
+}
+
+static void test_st2110_21_narrow_pacer(void)
+{
+    printf("[TEST] Testing ST 2110-21 Narrow sender pacer...\n");
+
+    /* 10 packets at 600 fps: period 1666666ns, interval 166666ns */
+    zstr_st2110_21_pacer_t *pacer =
+        zstr_st2110_21_pacer_create(&(zstr_st2110_21_config_t){
+            .width = 320, .height = 240, .fps_num = 600, .fps_den = 1,
+            .pacer_type = 0 });
+    assert(pacer != NULL);
+
+    assert(zstr_st2110_21_frame_start(pacer, 90000, 10) == 0);
+    int64_t interval = zstr_st2110_21_packet_interval_ns(pacer);
+    assert(interval == 1666666 / 10);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int64_t prev = 0;
+    int64_t max_gap = 0;
+    for (int i = 0; i < 10; i++) {
+        assert(zstr_st2110_21_wait_packet(pacer) == 0);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t el = (now.tv_sec - t0.tv_sec) * 1000000000LL +
+                     (now.tv_nsec - t0.tv_nsec);
+        if (i > 0) {
+            int64_t gap = el - prev;
+            if (gap > max_gap) max_gap = gap;
+        }
+        prev = el;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    int64_t total = (t1.tv_sec - t0.tv_sec) * 1000000000LL +
+                    (t1.tv_nsec - t0.tv_nsec);
+    /* Total spans ~9 intervals: allow wide CI bounds (scheduling jitter) */
+    assert(total >= 9 * 166666 / 2);
+    assert(total <= 9 * 166666 * 4);
+    /* No bursts: max inter-packet gap bounded (generous for CI) */
+    assert(max_gap <= 166666 * 6);
+    assert(zstr_st2110_21_late_count(pacer) == 0);
+
+    /* 11th wait on a 10-packet frame must fail */
+    assert(zstr_st2110_21_wait_packet(pacer) < 0);
+
+    /* Same timestamp re-announce is idempotent, new timestamp restarts */
+    assert(zstr_st2110_21_frame_start(pacer, 90000, 10) == 0);
+    assert(zstr_st2110_21_frame_start(pacer, 91800, 10) == 0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+
+    zstr_st2110_21_pacer_free(&pacer);
+
+    printf("[PASS] ST 2110-21 Narrow pacer passed.\n");
+}
+
+static void test_st2022_5_row_fec(void)
+{
+    printf("[TEST] Testing ST 2022-5 row FEC encode/recover...\n");
+
+    zstr_st2022_5_fec_t *enc =
+        zstr_st2022_5_fec_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 });
+    zstr_st2022_5_fec_decoder_t *dec =
+        zstr_st2022_5_fec_decoder_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 },
+                                        96);
+    assert(enc != NULL && dec != NULL);
+
+    /* Build one row of 4 media packets (PT=96, varying payload) */
+    AVPacket *media[4];
+    for (int i = 0; i < 4; i++) {
+        media[i] = av_packet_alloc();
+        av_new_packet(media[i], 12 + 100 + i * 10);
+        uint8_t *d = media[i]->data;
+        d[0] = 0x80;
+        d[1] = 96 | (i == 3 ? 0x80 : 0x00);
+        d[2] = 0; d[3] = (uint8_t)(1000 + i);
+        uint32_t ts = 90000;
+        d[4] = (ts >> 24) & 0xFF; d[5] = (ts >> 16) & 0xFF;
+        d[6] = (ts >> 8) & 0xFF; d[7] = ts & 0xFF;
+        d[8] = 0x21; d[9] = 0x10; d[10] = 0x20; d[11] = 0x01;
+        for (int k = 0; k < 100 + i * 10; k++) d[12 + k] = (uint8_t)(i * 17 + k);
+        media[i]->pts = 90000;
+        media[i]->time_base = (AVRational){ 1, 90000 };
+    }
+
+    AVPacket *fec = NULL;
+    for (int i = 0; i < 4; i++) {
+        AVPacket *f = zstr_st2022_5_fec_encode(enc, media[i]);
+        if (i < 3) assert(f == NULL);
+        else { assert(f != NULL); fec = f; }
+    }
+    assert(fec != NULL);
+    assert((fec->data[1] & 0x7F) == 127);
+    /* SN base + length recovery + PT recovery + mask + TS recovery */
+    assert(fec->data[12] == 3 && fec->data[13] == 0xE8); /* base 1000 */
+    assert(fec->data[16] == 96);
+    assert(fec->size == 24 + 130); /* max payload 130 */
+
+    /* Drop packet 2 (seq 1002), feed the rest + FEC */
+    for (int i = 0; i < 4; i++) {
+        if (i == 2) continue;
+        assert(zstr_st2022_5_fec_decoder_media(dec, media[i]) == 0);
+    }
+    AVPacket *rec = zstr_st2022_5_fec_decoder_fec(dec, fec);
+    assert(rec != NULL);
+    assert(rec->size == media[2]->size);
+    assert(memcmp(rec->data, media[2]->data, media[2]->size) == 0);
+    assert(zstr_st2022_5_fec_recovered(dec) == 1);
+
+    /* Drop two of four: unrecoverable (fresh row at seq 2000) */
+    zstr_st2022_5_fec_t *enc2 =
+        zstr_st2022_5_fec_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 });
+    zstr_st2022_5_fec_decoder_t *dec2 =
+        zstr_st2022_5_fec_decoder_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 },
+                                        96);
+    AVPacket *m2[4], *fec2 = NULL;
+    for (int i = 0; i < 4; i++) {
+        m2[i] = av_packet_alloc();
+        av_new_packet(m2[i], 12 + 80);
+        uint8_t *d = m2[i]->data;
+        d[0] = 0x80; d[1] = 96;
+        d[2] = 0; d[3] = (uint8_t)(2000 + i);
+        memset(d + 4, 0, 8);
+        for (int k = 0; k < 80; k++) d[12 + k] = (uint8_t)(i + k);
+        AVPacket *f = zstr_st2022_5_fec_encode(enc2, m2[i]);
+        if (f) fec2 = f;
+    }
+    assert(fec2 != NULL);
+    assert(zstr_st2022_5_fec_decoder_media(dec2, m2[0]) == 0);
+    assert(zstr_st2022_5_fec_decoder_media(dec2, m2[3]) == 0);
+    AVPacket *rec2 = zstr_st2022_5_fec_decoder_fec(dec2, fec2);
+    assert(rec2 == NULL);
+    assert(zstr_st2022_5_fec_unrecoverable(dec2) == 1);
+    for (int i = 0; i < 4; i++) av_packet_free(&m2[i]);
+    av_packet_free(&fec2);
+    zstr_st2022_5_fec_free(&enc2);
+    zstr_st2022_5_fec_decoder_free(&dec2);
+
+    /* Wrap-around: row spanning 65534..65535,0,1 recovers the middle loss */
+    zstr_st2022_5_fec_t *enc3 =
+        zstr_st2022_5_fec_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 });
+    zstr_st2022_5_fec_decoder_t *dec3 =
+        zstr_st2022_5_fec_decoder_create(&(zstr_st2022_5_config_t){ .row_len = 4, .fec_pt = 127 },
+                                        96);
+    AVPacket *fec3 = NULL;
+    AVPacket *wm[4];
+    for (int i = 0; i < 4; i++) {
+        uint16_t sq = (uint16_t)(65534 + i);
+        wm[i] = av_packet_alloc();
+        av_new_packet(wm[i], 12 + 64);
+        uint8_t *d = wm[i]->data;
+        d[0] = 0x80; d[1] = 96;
+        d[2] = (uint8_t)(sq >> 8); d[3] = (uint8_t)(sq & 0xFF);
+        memset(d + 4, 0, 8);
+        for (int k = 0; k < 64; k++) d[12 + k] = (uint8_t)(i + k);
+        AVPacket *f = zstr_st2022_5_fec_encode(enc3, wm[i]);
+        if (f) fec3 = f;
+    }
+    assert(fec3 != NULL);
+    for (int i = 0; i < 4; i++) {
+        if (i == 2) continue; /* lose seq 0 */
+        assert(zstr_st2022_5_fec_decoder_media(dec3, wm[i]) == 0);
+    }
+    AVPacket *rec3 = zstr_st2022_5_fec_decoder_fec(dec3, fec3);
+    assert(rec3 != NULL);
+    assert(rec3->size == wm[2]->size);
+    assert(memcmp(rec3->data, wm[2]->data, wm[2]->size) == 0);
+
+    for (int i = 0; i < 4; i++) {
+        av_packet_free(&media[i]);
+        av_packet_free(&wm[i]);
+    }
+    av_packet_free(&fec);
+    av_packet_free(&rec);
+    av_packet_free(&rec3);
+    av_packet_free(&fec3);
+    zstr_st2022_5_fec_free(&enc);
+    zstr_st2022_5_fec_free(&enc3);
+    zstr_st2022_5_fec_decoder_free(&dec);
+    zstr_st2022_5_fec_decoder_free(&dec3);
+
+    printf("[PASS] ST 2022-5 row FEC passed.\n");
+}
+
+static void test_st2110_22_rfc9134_roundtrip(void)
+{
+    printf("[TEST] Testing ST 2110-22 RFC 9134 codestream packetization...\n");
+
+    zstr_st2110_22_payloader_t *pay =
+        zstr_st2110_22_payloader_create(&(zstr_st2110_22_config_t){
+            .payload_type = 96, .ssrc = 0x21102201, .mtu = 256 });
+    zstr_st2110_22_depayloader_t *depay =
+        zstr_st2110_22_depayloader_create(&(zstr_st2110_22_config_t){
+            .payload_type = 96 });
+    assert(pay != NULL && depay != NULL);
+
+    /* Synthetic codestream: SOC + header + slices + EOC */
+    uint8_t cs[1200];
+    int pos = 0;
+    cs[pos++] = 0xFF; cs[pos++] = 0x10; /* SOC */
+    for (int i = 0; i < 100; i++) cs[pos++] = (uint8_t)(0x20 + i);
+    for (int sli = 0; sli < 3; sli++) {
+        cs[pos++] = 0xFF; cs[pos++] = 0x22; /* SLH-ish */
+        for (int i = 0; i < 300; i++) cs[pos++] = (uint8_t)(sli * 40 + i);
+    }
+    cs[pos++] = 0xFF; cs[pos++] = 0x11; /* EOC */
+    int cs_len = pos;
+
+    AVPacket *in_pkt = av_packet_alloc();
+    av_new_packet(in_pkt, cs_len);
+    memcpy(in_pkt->data, cs, cs_len);
+    in_pkt->pts = 180000;
+    in_pkt->time_base = (AVRational){ 1, 90000 };
+
+    AVPacket **rtp_pkts = NULL;
+    int nb_pkts = 0;
+    int ret = zstr_st2110_22_payloader_process(pay, in_pkt, &rtp_pkts, &nb_pkts);
+    assert(ret == 0);
+    assert(nb_pkts > 1); /* 1206 bytes over 240-byte payloads */
+    for (int i = 0; i < nb_pkts; i++) {
+        uint8_t *d = rtp_pkts[i]->data;
+        assert((d[0] >> 6) == 2);
+        bool m = (d[1] & 0x80) != 0;
+        assert(m == (i == nb_pkts - 1));
+        /* Payload header: T=1 K=0 L=M I=00 */
+        assert((d[12] & 0x80) != 0); /* T */
+        assert((d[12] & 0x40) == 0); /* K */
+        assert(((d[12] & 0x20) != 0) == m); /* L == M */
+        assert((d[12] & 0x18) == 0); /* I */
+        assert((d[12] & 0x1F) == 0); /* F counter 0 (first frame) */
+        /* P counter increments */
+        int p = ((d[14] & 0x1F) << 8) | d[15];
+        assert(p == i);
+    }
+
+    AVPacket *out_pkt = av_packet_alloc();
+    bool ready = false;
+    for (int i = 0; i < nb_pkts; i++) {
+        ret = zstr_st2110_22_depayloader_process(depay, rtp_pkts[i], out_pkt, &ready);
+        assert(ret == 0);
+        assert(ready == (i == nb_pkts - 1));
+    }
+    assert(ready == true);
+    assert(out_pkt->size == cs_len);
+    assert(memcmp(out_pkt->data, cs, cs_len) == 0);
+
+    zstr_st2110_22_payloader_free_packets(rtp_pkts, nb_pkts);
+    av_packet_free(&in_pkt);
+    av_packet_free(&out_pkt);
+    zstr_st2110_22_payloader_free(&pay);
+    zstr_st2110_22_depayloader_free(&depay);
+
+    printf("[PASS] ST 2110-22 RFC 9134 roundtrip passed.\n");
+}
+
+static void test_st2110_22_encode_decode(void)
+{
+    printf("[TEST] Testing ST 2110-22 SVT-JPEG-XS encode/decode...\n");
+
+    zstr_st2110_22_encoder_t *enc =
+        zstr_st2110_22_encoder_create(&(zstr_st2110_22_config_t){
+            .width = 640, .height = 480, .bpp_num = 3, .bpp_den = 1 });
+    if (!enc) {
+        printf("[SKIP] SVT-JPEG-XS not available, skipping encode/decode.\n");
+        return;
+    }
+    zstr_st2110_22_decoder_t *dec =
+        zstr_st2110_22_decoder_create(&(zstr_st2110_22_config_t){
+            .width = 640, .height = 480 });
+    assert(dec != NULL);
+
+    AVFrame *in = av_frame_alloc();
+    in->width = 640;
+    in->height = 480;
+    in->format = AV_PIX_FMT_YUV422P;
+    assert(av_frame_get_buffer(in, 32) == 0);
+    assert(av_frame_make_writable(in) == 0);
+    for (int y = 0; y < 480; y++) {
+        memset(in->data[0] + y * in->linesize[0], (y * 255) / 480, 640);
+        memset(in->data[1] + y * in->linesize[1], 128, 320);
+        memset(in->data[2] + y * in->linesize[2], 128, 320);
+    }
+    in->pts = 0;
+
+    AVPacket *coded = NULL;
+    int ret = zstr_st2110_22_encode(enc, in, &coded);
+    assert(ret == 0 && coded != NULL);
+    assert(coded->size > 100); /* real codestream, not empty */
+    assert(coded->data[0] == 0xFF && coded->data[1] == 0x10); /* SOC */
+    printf("[INFO] JPEG XS codestream: %d bytes (%.2f bpp).\n",
+           coded->size, coded->size * 8.0 / (640 * 480));
+
+    AVFrame *out = NULL;
+    ret = zstr_st2110_22_decode(dec, coded, &out);
+    assert(ret == 0 && out != NULL);
+    assert(out->width == 640 && out->height == 480);
+    assert(out->format == AV_PIX_FMT_YUV422P);
+
+    /* Sanity: vertical gradient survives (top dark, bottom bright) */
+    int top = out->data[0][10 * out->linesize[0] + 320];
+    int bottom = out->data[0][470 * out->linesize[0] + 320];
+    assert(bottom > top + 50);
+
+    av_frame_free(&in);
+    av_frame_free(&out);
+    av_packet_free(&coded);
+    zstr_st2110_22_encoder_free(&enc);
+    zstr_st2110_22_decoder_free(&dec);
+
+    printf("[PASS] ST 2110-22 encode/decode passed.\n");
+}
+
 static void test_st2110_device_loopback(void)
 {
     printf("[TEST] Testing ST 2110 FFmpeg Device Loopback (127.0.0.1:25000)...\n");
@@ -275,6 +704,11 @@ int main(int argc, char **argv)
     test_st2110_20_video_roundtrip();
     test_st2110_30_audio_roundtrip();
     test_st2022_7_redundancy();
+    test_st2110_40_anc_roundtrip();
+    test_st2110_21_narrow_pacer();
+    test_st2022_5_row_fec();
+    test_st2110_22_rfc9134_roundtrip();
+    test_st2110_22_encode_decode();
     test_st2110_device_loopback();
 
     printf("====================================================\n");

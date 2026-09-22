@@ -30,6 +30,16 @@ pkg_check_modules(FREETYPE freetype2)
 find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
 find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
 
+# SVT-JPEG-XS (ST 2110-22 software codec, optional)
+pkg_check_modules(SVT_JPEGXS SvtJpegxs)
+if(SVT_JPEGXS_FOUND)
+    set(HAS_SVT_JPEGXS ON)
+    message(STATUS "SVT-JPEG-XS enabled (ST 2110-22 encode/decode)")
+else()
+    set(HAS_SVT_JPEGXS OFF)
+    message(STATUS "SVT-JPEG-XS not found (ST 2110-22 codec tests skip)")
+endif()
+
 # WebRTC (libdatachannel, patched with outgoing track interceptors for TWCC)
 find_package(LibDataChannel QUIET)
 if(NOT LibDataChannel_FOUND)
@@ -98,7 +108,11 @@ set(PLUGINS_SOURCES
     src/plugins/streaming/zstr_rtp_payloader.c
     src/plugins/streaming/zstr_rtp_depayloader.c
     src/plugins/broadcast/zstr_st2110_20.c
+    src/plugins/broadcast/zstr_st2110_21.c
+    src/plugins/broadcast/zstr_st2110_22.c
     src/plugins/broadcast/zstr_st2110_30.c
+    src/plugins/broadcast/zstr_st2110_40.c
+    src/plugins/broadcast/zstr_st2022_5.c
     src/plugins/broadcast/zstr_st2022_7.c
     src/plugins/broadcast/zstr_st2110_device.c
     src/plugins/streaming/zstr_srt_parser.c
@@ -134,6 +148,12 @@ if(HAS_WEBRTC)
         target_include_directories(zff-plugins PRIVATE ${DATACHANNEL_INCLUDE_DIRS})
         target_link_libraries(zff-plugins PUBLIC ${DATACHANNEL_LIBRARIES})
     endif()
+endif()
+
+if(HAS_SVT_JPEGXS)
+    add_compile_definitions(ZSTR_HAVE_SVT_JPEGXS=1)
+    target_include_directories(zff-plugins PRIVATE ${SVT_JPEGXS_INCLUDE_DIRS})
+    target_link_libraries(zff-plugins PUBLIC ${SVT_JPEGXS_LIBRARIES})
 endif()
 
 target_link_libraries(zff-plugins

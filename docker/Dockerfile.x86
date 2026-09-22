@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     pkg-config \
+    nasm \
+    yasm \
     ca-certificates \
     curl \
     git \
@@ -69,6 +71,15 @@ RUN cd /tmp && \
     make install && \
     ldconfig && \
     rm -rf /tmp/libdatachannel /tmp/libdatachannel-twcc.patch
+
+# ── Build SVT-JPEG-XS from source (ST 2110-22 software codec) ─────────────
+RUN cd /tmp && \
+    git clone --depth 1 https://github.com/OpenVisualCloud/SVT-JPEG-XS.git && \
+    cd SVT-JPEG-XS/Build/linux && \
+    ./build.sh release && \
+    make -C Release install && \
+    ldconfig && \
+    rm -rf /tmp/SVT-JPEG-XS
 
 WORKDIR /workspace
 

@@ -20,9 +20,9 @@ All elements migrated from `zstreamer` are named with the **`zstr_`** prefix and
 
 | Plugin Name | Type | Original Element | Transplanted Core Algorithm / Feature | Buffer Model | Options (`AVOption`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`zstr_asrc_resample`** | Audio Filter (`af_`) | `audio_resampler.c` | **PTS-based ASRC drift compensation**; dynamic `swr_set_compensation`; fractional rate override (`rate_numer/denom`); block sample slicing | `AVFrame` ➔ `AVFrame` | `sample_rate`, `max_drift_ppm`, `drift_interval`, `rate_numer`, `rate_denom`, `block_samples` |
+| **`zstr_aresample`** | Audio engine (C, `alloc/process/flush/free`) | `audio_resampler.c` | **PTS-based ASRC drift compensation**; dynamic `swr_set_compensation`; fractional rate override (`rate_numer/denom`); block sample slicing | `AVFrame` ➔ `AVFrame` | `sample_rate`, `max_drift_ppm`, `drift_interval`, `rate_numer`, `rate_denom`, `block_samples` |
 | **`zstr_amix`** | Audio Filter (`af_`) | `audio_mixer.c` | **Dynamic multi-channel mixer**; per-channel volume/mute; soft-clipping float limiter | Multiple `AVFrame` ➔ Single `AVFrame` | `inputs`, `weights`, `normalize`, `dropout_transition` |
-| **`zstr_atestsrc`** | Audio Source (`asrc_`) | `audio_test_src.c` | **Multi-waveform generator**; high-precision timestamp generation (Sine, Noise, DTMF) | Generates `AVFrame` | `sample_rate`, `channels`, `freq`, `wave_type`, `duration` |
+| **`zstr_audiotestsrc`** | Audio Source (indev) | `audio_test_src.c` | **Multi-waveform generator**; high-precision timestamp generation (Sine, Noise, DTMF) | Generates `AVFrame` | `sample_rate`, `channels`, `freq`, `wave_type`, `duration` |
 
 ---
 

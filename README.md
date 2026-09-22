@@ -7,7 +7,7 @@
 
 Instead of reinventing custom pipeline schedulers, pads, caps, and queues, `zff` adopts FFmpeg as its native pipeline backbone and provides:
 1. **`libzff-core`**: A lightweight core bridge SDK for proprietary hardware structures (such as NVIDIA `NvBufSurface` on Jetson, Linux DMABUF, PTP hardware clocks, and custom SideData).
-2. **`zstr_*` FFmpeg Plugins**: A rich collection of native FFmpeg plugins (`libavfilter`, `libavformat`, `libavdevice`, `libavcodec`) implementing broadcast-grade protocols (SMPTE ST 2110-20/30/40, 2022-7 Hitless Merge, Dante/DEP), clock-drift compensated ASRC, and zero-copy hardware pipelines.
+2. **`zstr_*` FFmpeg devices + C engines**: AVFormat/AVDevice devices (`libavformat`, `libavdevice`) plus C processing engines (`zff_engine.h` contract) implementing broadcast-grade protocols (SMPTE ST 2110-20/30/40, 2022-7 Hitless Merge), clock-drift compensated ASRC, and zero-copy hardware pipelines. No out-of-tree AVFilters (impossible with distro headers); no Dante yet (roadmap).
 
 ---
 
@@ -41,12 +41,12 @@ Instead of reinventing custom pipeline schedulers, pads, caps, and queues, `zff`
 │          libzff-core.so              │  │      zstr_* FFmpeg Plugins   │
 │   【 Hardware Bridge & Data SDK 】    │  │   【 Shared Object (.so) 】   │
 ├──────────────────────────────────────┤  ├──────────────────────────────┤
-│ • NvBufSurface ↔ AVFrame Zero-copy   │  │ • libavfilter:               │
-│ • DMABUF / CUDA / OneAPI Memory      │  │   zstr_asrc_resample,        │
-│ • SideData FourCC & TLV Accessors    │  │   zstr_scale, zstr_glsink... │
+│ • NvBufSurface ↔ AVFrame Zero-copy   │  │ • C engines (no AVFilter):    │
+│ • DMABUF / CUDA / OneAPI Memory      │  │   zstr_aresample, zstr_scale, │
+│ • SideData FourCC & TLV Accessors    │  │   zstr_amix, zstr_rtp...      │
 │ • IEEE 1588 PTP ↔ FFmpeg Timebase    │  │ • libavformat:               │
 │ • Custom Extensible Struct Types     │  │   zstr_st2110, zstr_webrtc,  │
-│                                      │  │   zstr_dante, zstr_rtspserver│
+│                                      │  │   zstr_rtspserver...          │
 │                                      │  │ • libavdevice:               │
 │                                      │  │   zstr_v4l2, zstr_alsa...    │
 └──────────────────────────────────────┘  └──────────────────────────────┘
@@ -59,23 +59,23 @@ Instead of reinventing custom pipeline schedulers, pads, caps, and queues, `zff`
 
 ## Quick Example
 
-### 1. Using standard FFmpeg CLI:
+### 1. Using standard FFmpeg CLI (devices only):
 ```bash
-# Capture camera via zero-copy DMABUF, apply ASRC drift compensation, stream to ST 2110 broadcast network
+# Capture camera + mic, stream raw packets to ST 2110 (processing engines
+# are C API, not -vf/-af: out-of-tree AVFilters are impossible with
+# distro libav* headers, see llms.txt)
 ffmpeg \
-  -f zstr_v4l2 -device /dev/video0 -pixel_format nv12 -i dummy \
-  -f zstr_alsa -device hw:0,0 -i dummy \
-  -vf "zstr_scale=w=1920:h=1080,zstr_text_overlay=text='CAM-1 LIVE'" \
-  -af "zstr_asrc_resample=max_drift_ppm=1000:rate_numer=48000:rate_denom=1" \
-  -f zstr_st2110_mux -dest_ip 239.1.1.1 -port 20000 dummy
+  -f zstr_v4l2 -video_size 1280x720 -i dummy \
+  -f zstr_alsa -i dummy \
+  -f zstr_st2110_mux -host 239.1.1.1 -port 20000 dummy
 ```
 
 ### 2. Using standard FFmpeg C API with `libzff-core`:
 ```c
 #include <zff/zff_core.h>
 #include <zff/zff_hw.h>
-#include <libavfilter/avfilter.h>
-#include <libavfilter/buffersrc.h>
+#include <zff/plugins/zstr_scale.h>
+#include <libavformat/avformat.h>
 
 int main() {
     // 1. Initialize zff plugins into FFmpeg
@@ -89,9 +89,13 @@ int main() {
     zff_ptp_time_t ptp = { .tai_nanoseconds = 1718000000000ULL, .domain = 0 };
     zff_frame_set_ptp(frame, &ptp);
 
-    // 4. Feed directly into standard FFmpeg AVFilterGraph or AVCodec
-    av_buffersrc_add_frame(filter_src_ctx, frame);
-    av_frame_free(&frame); // Safe refcount decremented
+    // 4. Run a C engine directly (no filter graph needed out-of-tree)
+    zstr_scale_t *sc = zstr_scale_alloc("w=1920:h=1080");
+    AVFrame *out = av_frame_alloc();   // engine sizes + allocates buffers
+    zstr_scale_process(sc, frame, out);
+    zstr_scale_free(&sc);
+    av_frame_free(&frame);
+    av_frame_free(&out);
 }
 ```
 

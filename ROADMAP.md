@@ -26,15 +26,15 @@ This document outlines the phased migration plan to freeze `zstreamer` and build
 **Duration:** 3 Weeks  
 **Deliverables:**
 1. **`libzstr_devices.so`**:
-   - `indev_zstr_v4l2`: Ported from `v4l2_source.c` (VIDIOC_EXPBUF DMABUF export + mock fallback).
-   - `indev_zstr_alsa`: Ported from `alsa_source.c` (RingBuffer protection + non-blocking poll).
+   - `zstr_v4l2` (indev): Ported from `v4l2_source.c` (VIDIOC_EXPBUF DMABUF export + mock fallback).
+   - `zstr_alsa` (indev): Ported from `alsa_source.c` (RingBuffer protection + non-blocking poll).
 2. **`libzstr_audio.so`**:
-   - `af_zstr_asrc_resample`: Ported from `audio_resampler.c` (PTS drift tracking + `swr_set_compensation`).
-   - `af_zstr_amix`: Ported from `audio_mixer.c`.
+   - `zstr_aresample` (C engine, not `af_`): Ported from `audio_resampler.c` (PTS drift tracking + `swr_set_compensation`).
+   - `zstr_amix` (C engine, not `af_`): Ported from `audio_mixer.c`.
 3. **`libzstr_video.so`**:
-   - `vf_zstr_scale`: 64-byte aligned SIMD scaling.
-   - `vf_zstr_text_overlay`: OSD timestamp overlay.
-   - `vsink_zstr_glsink`: OpenGL/GLX zero-copy display sink with Xvfb CI support.
+   - `zstr_scale` (C engine): 64-byte aligned SIMD scaling.
+   - `zstr_text_overlay` (C engine): OSD timestamp overlay.
+   - `zstr_glsink` (outdev): OpenGL/GLX zero-copy display sink with Xvfb CI support.
 
 ---
 

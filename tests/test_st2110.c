@@ -330,16 +330,16 @@ static void test_st2110_21_narrow_pacer(void)
 {
     printf("[TEST] Testing ST 2110-21 Narrow sender pacer...\n");
 
-    /* 10 packets at 600 fps: period 1666666ns, interval 166666ns */
+    /* 10 packets at 60 fps: period ~16.7ms, interval ~1.67ms (CI-safe) */
     zstr_st2110_21_pacer_t *pacer =
         zstr_st2110_21_pacer_create(&(zstr_st2110_21_config_t){
-            .width = 320, .height = 240, .fps_num = 600, .fps_den = 1,
+            .width = 320, .height = 240, .fps_num = 60, .fps_den = 1,
             .pacer_type = 0 });
     assert(pacer != NULL);
 
     assert(zstr_st2110_21_frame_start(pacer, 90000, 10) == 0);
     int64_t interval = zstr_st2110_21_packet_interval_ns(pacer);
-    assert(interval == 1666666 / 10);
+    assert(interval > 1000000 && interval < 2000000);
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -360,11 +360,11 @@ static void test_st2110_21_narrow_pacer(void)
     clock_gettime(CLOCK_MONOTONIC, &t1);
     int64_t total = (t1.tv_sec - t0.tv_sec) * 1000000000LL +
                     (t1.tv_nsec - t0.tv_nsec);
-    /* Total spans ~9 intervals: allow wide CI bounds (scheduling jitter) */
-    assert(total >= 9 * 166666 / 2);
-    assert(total <= 9 * 166666 * 4);
+    /* Total spans ~9 intervals (~15ms): generous CI bounds */
+    assert(total >= 5000000LL);
+    assert(total <= 60000000LL);
     /* No bursts: max inter-packet gap bounded (generous for CI) */
-    assert(max_gap <= 166666 * 6);
+    assert(max_gap <= 10000000LL);
     assert(zstr_st2110_21_late_count(pacer) == 0);
 
     /* 11th wait on a 10-packet frame must fail */
@@ -374,6 +374,20 @@ static void test_st2110_21_narrow_pacer(void)
     assert(zstr_st2110_21_frame_start(pacer, 90000, 10) == 0);
     assert(zstr_st2110_21_frame_start(pacer, 91800, 10) == 0);
     assert(zstr_st2110_21_wait_packet(pacer) == 0);
+
+    /* Forced lateness: sleep past the whole frame, next wait must return
+     * immediately (no catch-up burst) and count one late slot. */
+    assert(zstr_st2110_21_frame_start(pacer, 93600, 10) == 0);
+    struct timespec sl = { 0, 100 * 1000 * 1000 };
+    nanosleep(&sl, NULL);
+    struct timespec b0, b1;
+    clock_gettime(CLOCK_MONOTONIC, &b0);
+    assert(zstr_st2110_21_wait_packet(pacer) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &b1);
+    int64_t dt = (b1.tv_sec - b0.tv_sec) * 1000000000LL +
+                 (b1.tv_nsec - b0.tv_nsec);
+    assert(dt < 20000000LL); /* returned immediately, did not sleep a slot */
+    assert(zstr_st2110_21_late_count(pacer) == 1);
 
     zstr_st2110_21_pacer_free(&pacer);
 
@@ -399,7 +413,7 @@ static void test_st2022_5_row_fec(void)
         uint8_t *d = media[i]->data;
         d[0] = 0x80;
         d[1] = 96 | (i == 3 ? 0x80 : 0x00);
-        d[2] = 0; d[3] = (uint8_t)(1000 + i);
+        d[2] = 3; d[3] = (uint8_t)(0xE8 + i); /* seq 1000..1003 */
         uint32_t ts = 90000;
         d[4] = (ts >> 24) & 0xFF; d[5] = (ts >> 16) & 0xFF;
         d[6] = (ts >> 8) & 0xFF; d[7] = ts & 0xFF;

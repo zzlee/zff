@@ -71,6 +71,7 @@ struct zstr_st2022_5_fec {
     uint8_t *xor_buf;
     int xor_cap;
     int xor_len;          /* protection length = max payload seen */
+    int len_xor;          /* XOR of payload lengths (recovers exact size) */
     uint16_t row_base_seq;
     uint32_t row_ts;
     uint8_t row_pt;
@@ -128,12 +129,14 @@ AVPacket *zstr_st2022_5_fec_encode(zstr_st2022_5_fec_t *s, const AVPacket *media
     if (s->row_count == 0) {
         memset(s->xor_buf, 0, s->xor_cap);
         s->xor_len = 0;
+        s->len_xor = 0;
         s->row_base_seq = seq;
         s->row_ts = pkt_ts(d);
         s->row_pt = d[1] & 0x7F;
     }
     for (int i = 0; i < payload_len; i++) s->xor_buf[i] ^= d[12 + i];
     if (payload_len > s->xor_len) s->xor_len = payload_len;
+    s->len_xor ^= payload_len;
     s->row_count++;
 
     if (s->row_count < s->row_len) return NULL;
@@ -164,8 +167,8 @@ AVPacket *zstr_st2022_5_fec_encode(zstr_st2022_5_fec_t *s, const AVPacket *media
     /* RFC 2733 FEC header */
     o[12] = (uint8_t)(s->row_base_seq >> 8);
     o[13] = (uint8_t)(s->row_base_seq & 0xFF);
-    o[14] = (uint8_t)(s->xor_len >> 8);
-    o[15] = (uint8_t)(s->xor_len & 0xFF);
+    o[14] = (uint8_t)(s->len_xor >> 8);
+    o[15] = (uint8_t)(s->len_xor & 0xFF);
     o[16] = s->row_pt & 0x7F; /* E=0 */
     uint32_t mask = (s->row_len >= 32) ? 0xFFFFFFFFu
                                        : (((uint32_t)1 << s->row_len) - 1);
@@ -292,7 +295,8 @@ AVPacket *zstr_st2022_5_fec_decoder_fec(zstr_st2022_5_fec_decoder_t *s,
     if (s->fec_pt == 0 && pt == s->media_pt) return NULL; /* not FEC */
 
     uint16_t base_seq = (uint16_t)((d[12] << 8) | d[13]);
-    int prot_len = (d[14] << 8) | d[15];
+    int len_rec = (d[14] << 8) | d[15];
+    int prot_len = fec->size - 24; /* protection buffer == FEC payload size */
     uint8_t pt_rec = d[16] & 0x7F;
     uint32_t mask = ((uint32_t)d[17] << 16) | ((uint32_t)d[18] << 8) | d[19];
     uint32_t ts_rec = ((uint32_t)d[20] << 24) | ((uint32_t)d[21] << 16) |
@@ -333,6 +337,16 @@ AVPacket *zstr_st2022_5_fec_decoder_fec(zstr_st2022_5_fec_decoder_t *s,
     }
     if (present != L - 1 || miss_off < 0) return NULL;
 
+    /* Exact missing length = recovery XOR present lengths */
+    int exact_len = len_rec;
+    for (int i = 0; i < L; i++) {
+        if (i == miss_off) continue;
+        uint32_t want = base_ext + (uint32_t)i;
+        fec_slot_t *slot = &s->window[want % ZSTR_FEC_WINDOW];
+        exact_len ^= slot->len;
+    }
+    if (exact_len < 0 || exact_len > prot_len) return NULL;
+
     uint8_t *rec = calloc(1, prot_len);
     if (!rec) return NULL;
     memcpy(rec, d + 24, prot_len);
@@ -360,7 +374,7 @@ AVPacket *zstr_st2022_5_fec_decoder_fec(zstr_st2022_5_fec_decoder_t *s,
     }
 
     AVPacket *out = av_packet_alloc();
-    if (!out || av_new_packet(out, 12 + prot_len) < 0) {
+    if (!out || av_new_packet(out, 12 + exact_len) < 0) {
         av_packet_free(&out);
         free(rec);
         return NULL;

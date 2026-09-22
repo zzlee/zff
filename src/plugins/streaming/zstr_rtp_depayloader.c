@@ -144,7 +144,9 @@ int zstr_rtp_depayloader_process(zstr_rtp_depayloader_t *s,
             uint8_t nal_hdr = (fu_indicator & 0x60) | orig_nal_type;
 
             if (start) {
-                s->au_size = 0;
+                /* Do NOT reset au_size here: earlier single NALs of the same
+                 * access unit (same timestamp) are already accumulated above.
+                 * Timestamp changes reset at function top. */
                 append_bytes(s, start_code, 4);
                 append_bytes(s, &nal_hdr, 1);
             }
@@ -201,7 +203,7 @@ int zstr_rtp_depayloader_process(zstr_rtp_depayloader_t *s,
             uint8_t n2 = payload[1];
 
             if (start) {
-                s->au_size = 0;
+                /* Same no-reset rule as H.264 FU-A above. */
                 append_bytes(s, start_code, 4);
                 append_bytes(s, &n1, 1);
                 append_bytes(s, &n2, 1);

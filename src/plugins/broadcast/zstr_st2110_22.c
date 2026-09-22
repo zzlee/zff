@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
@@ -124,16 +125,18 @@ int zstr_st2110_22_encode(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
     enc_in.image.data_yuv[0] = frame->data[0];
     enc_in.image.alloc_size[0] = (uint32_t)(frame->linesize[0] * frame->height);
     enc_in.image.stride[0] = (uint32_t)frame->linesize[0];
+    /* NOTE: YUV422 chroma planes are full height (half width) */
     enc_in.image.data_yuv[1] = frame->data[1];
-    enc_in.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * frame->height / 2);
+    enc_in.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * frame->height);
     enc_in.image.stride[1] = (uint32_t)frame->linesize[1];
     enc_in.image.data_yuv[2] = frame->data[2];
-    enc_in.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * frame->height / 2);
+    enc_in.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * frame->height);
     enc_in.image.stride[2] = (uint32_t)frame->linesize[2];
     enc_in.bitstream.buffer = s->bitstream_buf;
     enc_in.bitstream.allocation_size = s->bitstream_cap;
 
-    if (svt_jpeg_xs_encoder_send_picture(s->enc, &enc_in, 1) != SvtJxsErrorNone)
+    SvtJxsErrorType_t serr = svt_jpeg_xs_encoder_send_picture(s->enc, &enc_in, 1);
+    if (serr != SvtJxsErrorNone)
         return AVERROR(EIO);
 
     svt_jpeg_xs_frame_t enc_out;
@@ -141,7 +144,20 @@ int zstr_st2110_22_encode(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
     enc_out.bitstream.buffer = s->bitstream_buf;
     enc_out.bitstream.allocation_size = s->bitstream_cap;
     enc_out.bitstream.used_size = 0;
-    SvtJxsErrorType_t err = svt_jpeg_xs_encoder_get_packet(s->enc, &enc_out, 1);
+    SvtJxsErrorType_t err = SvtJxsErrorNone;
+    /* The encoder pipeline is asynchronous: poll until a packet lands
+     * (NoErrorEmptyQueue or None-with-zero both mean retry). */
+    for (int i = 0; i < 200; i++) {
+        enc_out.bitstream.used_size = 0;
+        err = svt_jpeg_xs_encoder_get_packet(s->enc, &enc_out, 1);
+        if (err == SvtJxsErrorNone && enc_out.bitstream.used_size > 0) break;
+        if (err != SvtJxsErrorNone &&
+            err != (SvtJxsErrorType_t)0x80002033 /* NoErrorEmptyQueue */)
+            return AVERROR(EIO);
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        err = SvtJxsErrorNone;
+    }
     if (err != SvtJxsErrorNone || enc_out.bitstream.used_size == 0)
         return AVERROR(EAGAIN);
 
@@ -456,10 +472,11 @@ int zstr_st2110_22_decode(zstr_st2110_22_decoder_t *s, const AVPacket *in,
         s->dec = calloc(1, sizeof(svt_jpeg_xs_decoder_api_t));
         if (!s->dec) return AVERROR(ENOMEM);
         memset(&s->img_cfg, 0, sizeof(s->img_cfg));
-        if (svt_jpeg_xs_decoder_init(SVT_JPEGXS_API_VER_MAJOR,
+        int dir = svt_jpeg_xs_decoder_init(SVT_JPEGXS_API_VER_MAJOR,
                                      SVT_JPEGXS_API_VER_MINOR,
                                      s->dec, in->data, in->size,
-                                     &s->img_cfg) != SvtJxsErrorNone) {
+                                     &s->img_cfg);
+        if (dir != SvtJxsErrorNone) {
             free(s->dec);
             s->dec = NULL;
             return AVERROR(EINVAL);
@@ -467,16 +484,11 @@ int zstr_st2110_22_decode(zstr_st2110_22_decoder_t *s, const AVPacket *in,
         s->dec_inited = 1;
     }
 
-    svt_jpeg_xs_frame_t dec_in;
-    memset(&dec_in, 0, sizeof(dec_in));
-    dec_in.bitstream.buffer = (uint8_t *)in->data;
-    dec_in.bitstream.allocation_size = (uint32_t)in->size;
-    if (svt_jpeg_xs_decoder_send_frame(s->dec, &dec_in, 1) != SvtJxsErrorNone)
-        return AVERROR(EIO);
-
-    /* Output image buffers: YUV422P 8-bit sized from negotiated geometry */
-    int w = (int)s->img_cfg.image_width;
-    int h = (int)s->img_cfg.image_height;
+    /* Output image buffers: YUV422P 8-bit sized from negotiated geometry.
+     * They ride along in send_frame (decoder validates data_yuv != NULL)
+     * and are surfaced again by get_frame. */
+    int w = (int)s->img_cfg.width;
+    int h = (int)s->img_cfg.height;
     if (w <= 0 || h <= 0) {
         w = s->width;
         h = s->height;
@@ -491,19 +503,50 @@ int zstr_st2110_22_decode(zstr_st2110_22_decoder_t *s, const AVPacket *in,
         return AVERROR(ENOMEM);
     }
 
+    svt_jpeg_xs_frame_t dec_in;
+    memset(&dec_in, 0, sizeof(dec_in));
+    dec_in.bitstream.buffer = (uint8_t *)in->data;
+    dec_in.bitstream.allocation_size = (uint32_t)in->size;
+    dec_in.bitstream.used_size = (uint32_t)in->size;
+    /* Output image buffers ride along (stored internally, surfaced by get) */
+    dec_in.image.data_yuv[0] = frame->data[0];
+    dec_in.image.alloc_size[0] = (uint32_t)(frame->linesize[0] * h);
+    dec_in.image.stride[0] = (uint32_t)frame->linesize[0];
+    dec_in.image.data_yuv[1] = frame->data[1];
+    dec_in.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * h);
+    dec_in.image.stride[1] = (uint32_t)frame->linesize[1];
+    dec_in.image.data_yuv[2] = frame->data[2];
+    dec_in.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * h);
+    dec_in.image.stride[2] = (uint32_t)frame->linesize[2];
+    SvtJxsErrorType_t dsr = svt_jpeg_xs_decoder_send_frame(s->dec, &dec_in, 1);
+    if (dsr != SvtJxsErrorNone) {
+        av_frame_free(&frame);
+        return AVERROR(EIO);
+    }
+
     svt_jpeg_xs_frame_t dec_out;
     memset(&dec_out, 0, sizeof(dec_out));
     dec_out.image.data_yuv[0] = frame->data[0];
     dec_out.image.alloc_size[0] = (uint32_t)(frame->linesize[0] * h);
     dec_out.image.stride[0] = (uint32_t)frame->linesize[0];
     dec_out.image.data_yuv[1] = frame->data[1];
-    dec_out.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * h / 2);
+    dec_out.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * h);
     dec_out.image.stride[1] = (uint32_t)frame->linesize[1];
     dec_out.image.data_yuv[2] = frame->data[2];
-    dec_out.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * h / 2);
+    dec_out.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * h);
     dec_out.image.stride[2] = (uint32_t)frame->linesize[2];
 
-    if (svt_jpeg_xs_decoder_get_frame(s->dec, &dec_out, 1) != SvtJxsErrorNone) {
+    SvtJxsErrorType_t derr = SvtJxsErrorNone;
+    for (int i = 0; i < 200; i++) {
+        derr = svt_jpeg_xs_decoder_get_frame(s->dec, &dec_out, 1);
+        if (derr == SvtJxsErrorNone) break;
+        if (derr != (SvtJxsErrorType_t)0x80002033 /* NoErrorEmptyQueue */)
+            break;
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        derr = SvtJxsErrorNone;
+    }
+    if (derr != SvtJxsErrorNone) {
         av_frame_free(&frame);
         return AVERROR(EIO);
     }

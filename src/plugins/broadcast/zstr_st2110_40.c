@@ -207,17 +207,13 @@ int zstr_st2110_40_depayloader_process(zstr_st2110_40_depayloader_t *s,
     s->cur_pts = rtp_pkt->pts;
     s->cur_tb = rtp_pkt->time_base;
 
-    /* Validate ANC framing of this fragment before accumulating */
-    int pos = 0;
-    while (pos < payload_len) {
-        int plen = anc_packet_len(payload + pos, payload_len - pos);
-        if (plen < 0) {
-            /* Allow a trailing partial packet only mid-set; a set that ENDS
-             * (marker) with a partial packet is corrupt. */
-            if (!marker) break;
+    /* Fragmentation is byte-level: only a fragment that STARTS a set must
+     * begin on an ANC packet header (DID/SDID/DC present); its full length
+     * need not fit this fragment. Mid-set fragments append blindly; the
+     * reassembled set is fully validated at marker time. */
+    if (s->accum_size == 0) {
+        if (payload_len < 3 || payload[0] < 0x04)
             return AVERROR_INVALIDDATA;
-        }
-        pos += plen;
     }
 
     if (s->accum_size + payload_len > s->accum_cap) return AVERROR(ENOMEM);
@@ -227,7 +223,7 @@ int zstr_st2110_40_depayloader_process(zstr_st2110_40_depayloader_t *s,
     if (!marker) return 0;
 
     /* Final validation over the reassembled set */
-    pos = 0;
+    int pos = 0;
     while (pos < s->accum_size) {
         int plen = anc_packet_len(s->accum + pos, s->accum_size - pos);
         if (plen < 0) {

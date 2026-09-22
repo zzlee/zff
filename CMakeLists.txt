@@ -176,6 +176,10 @@ target_link_libraries(zff-plugins
 # Testing
 if(BUILD_TESTS)
     enable_testing()
+    # Tests rely on assert() for validation; Release must not define NDEBUG
+    # (mirrors zstreamer: otherwise asserts compile out and failures crash
+    # elsewhere with no location).
+    add_compile_options(-UNDEBUG)
 
     add_executable(test_core tests/test_core.c)
     target_link_libraries(test_core PRIVATE zff-core)

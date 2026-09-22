@@ -93,6 +93,17 @@ int zstr_st2110_21_wait_packet(zstr_st2110_21_pacer_t *s)
     int64_t due = s->frame_t0_ns +
                   (int64_t)s->packets_sent * s->packet_interval_ns;
     int64_t now = mono_ns();
+    if (s->packets_sent == 0) {
+        /* First packet of the frame goes immediately; rebase the schedule
+         * to the actual emission time so frame_start→wait latency never
+         * counts as a missed slot. Idling past the whole frame still
+         * counts one late slot. */
+        if (now - s->frame_t0_ns > s->frame_period_ns)
+            s->late_packets++;
+        s->frame_t0_ns = now;
+        s->packets_sent = 1;
+        return 0;
+    }
     if (due > now) {
         int64_t wait_ns = due - now;
         struct timespec ts;

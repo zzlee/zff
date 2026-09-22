@@ -79,6 +79,23 @@ include_directories(
     ${SRT_INCLUDE_DIRS}
 )
 
+# Library directories: bare -l flags rely on the default search path, which
+# breaks with a custom PREFIX install (e.g. /opt/zff-ffmpeg on Kaggle) by
+# silently falling back to system libs. Emit -L for every dependency dir.
+link_directories(
+    ${AVUTIL_LIBRARY_DIRS}
+    ${AVCODEC_LIBRARY_DIRS}
+    ${AVFORMAT_LIBRARY_DIRS}
+    ${AVFILTER_LIBRARY_DIRS}
+    ${AVDEVICE_LIBRARY_DIRS}
+    ${SWSCALE_LIBRARY_DIRS}
+    ${SWRESAMPLE_LIBRARY_DIRS}
+    ${ALSA_LIBRARY_DIRS}
+    ${GL_LIBRARY_DIRS}
+    ${X11_LIBRARY_DIRS}
+    ${FREETYPE_LIBRARY_DIRS}
+)
+
 # Core SDK Library (libzff-core)
 set(CORE_SOURCES
     src/core/zff_core.c

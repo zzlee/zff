@@ -44,9 +44,10 @@ static int count_ext(const char *dir, const char *ext)
     return n;
 }
 
-static void test_hls_mux_and_demux_back(void)
+static void test_hls_mux_and_demux_back(const char *segment_type, const char *seg_ext)
 {
-    printf("[TEST] HLS mux to dir + demux-back via playlist...\n");
+    printf("[TEST] HLS mux to dir + demux-back via playlist (segment_type=%s)...\n",
+           segment_type);
 
     char dir[] = "/tmp/zstr_hls_test_XXXXXX";
     CHECK(mkdtemp(dir) != NULL);
@@ -85,6 +86,7 @@ static void test_hls_mux_and_demux_back(void)
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "hls_time", "1", 0);
     av_dict_set(&opts, "hls_list_size", "0", 0); /* keep all segments */
+    av_dict_set(&opts, "segment_type", segment_type, 0);
     CHECK(avformat_write_header(oc, &opts) >= 0);
     av_dict_free(&opts);
 
@@ -126,9 +128,10 @@ static void test_hls_mux_and_demux_back(void)
 
     /* Playlist + segments exist */
     CHECK(count_ext(dir, ".m3u8") >= 1);
-    int nseg = count_ext(dir, ".ts");
+    int nseg = count_ext(dir, seg_ext);
     CHECK(nseg >= 1);
-    printf("[INFO] Playlist + %d MPEG-TS segment(s) written.\n", nseg);
+    printf("[INFO] Playlist + %d %s segment(s) written.\n", nseg,
+           strcmp(segment_type, "fmp4") == 0 ? "fMP4" : "MPEG-TS");
 
     /* Demux back through the playlist with the NATIVE hls demuxer */
     AVFormatContext *ic = NULL;
@@ -163,7 +166,7 @@ static void test_hls_mux_and_demux_back(void)
     closedir(d);
     rmdir(dir);
 
-    printf("[PASS] HLS mux + demux-back passed.\n");
+    printf("[PASS] HLS mux + demux-back passed (segment_type=%s).\n", segment_type);
 }
 
 int main(void)
@@ -173,7 +176,8 @@ int main(void)
     printf("====================================================\n");
 
     zff_plugins_register_all();
-    test_hls_mux_and_demux_back();
+    test_hls_mux_and_demux_back("mpegts", ".ts");
+    test_hls_mux_and_demux_back("fmp4", ".m4s");
 
     printf("====================================================\n");
     printf("       All zstr HLS Tests Passed!                   \n");

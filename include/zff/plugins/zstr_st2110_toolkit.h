@@ -221,6 +221,23 @@ int zstr_st2022_7_demux_process(zstr_st2022_7_demux_t *s,
                                 bool *is_duplicate);
 void zstr_st2022_7_demux_free(zstr_st2022_7_demux_t **s);
 
+/* ---------------------------------------------------------------------------
+ * SMPTE ST 2022-7: Seamless Redundancy Sender (dual-send mux)
+ * --------------------------------------------------------------------------- */
+typedef struct zstr_st2022_7_mux zstr_st2022_7_mux_t;
+
+zstr_st2022_7_mux_t *zstr_st2022_7_mux_create(void);
+/**
+ * Clone in_pkt into out_a (primary) and out_b (secondary); both owned by
+ * the caller. The copies are bit-identical per ST 2022-7.
+ */
+int zstr_st2022_7_mux_process(zstr_st2022_7_mux_t *s,
+                              const AVPacket *in_pkt,
+                              AVPacket **out_a,
+                              AVPacket **out_b);
+uint64_t zstr_st2022_7_mux_count(const zstr_st2022_7_mux_t *s);
+void zstr_st2022_7_mux_free(zstr_st2022_7_mux_t **ps);
+
 #ifdef __cplusplus
 }
 #endif

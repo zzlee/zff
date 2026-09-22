@@ -12,6 +12,7 @@
 
 #include "zff/plugins/zstr_st2110.h"
 #include "zff/plugins/zstr_st2110_toolkit.h"
+#include "zff/plugins/zstr_st2110_sdp.h"
 #include "zff/zff_core.h"
 
 static void test_st2110_20_video_roundtrip(void)
@@ -650,6 +651,150 @@ static void test_st2110_22_encode_decode(void)
     printf("[PASS] ST 2110-22 encode/decode passed.\n");
 }
 
+static void test_st2022_7_mux_dualsend(void)
+{
+    printf("[TEST] Testing SMPTE ST 2022-7 dual-send mux + demux loop...\n");
+
+    zstr_st2022_7_mux_t *mux = zstr_st2022_7_mux_create();
+    zstr_st2022_7_demux_t *demux = zstr_st2022_7_demux_create();
+    assert(mux != NULL && demux != NULL);
+
+    int forwarded = 0;
+    for (uint16_t seq = 200; seq < 210; seq++) {
+        AVPacket *in = av_packet_alloc();
+        av_new_packet(in, 20);
+        in->data[0] = 0x80;
+        in->data[1] = 96;
+        in->data[2] = (uint8_t)(seq >> 8);
+        in->data[3] = (uint8_t)(seq & 0xFF);
+
+        AVPacket *a = NULL, *b = NULL;
+        int ret = zstr_st2022_7_mux_process(mux, in, &a, &b);
+        assert(ret == 0);
+        assert(a != NULL && b != NULL);
+        /* Bit-identical copies per ST 2022-7 */
+        assert(a->size == b->size && a->size == in->size);
+        assert(memcmp(a->data, b->data, a->size) == 0);
+
+        bool dup_a = true, dup_b = true;
+        assert(zstr_st2022_7_demux_process(demux, 0, a, &dup_a) == 0);
+        assert(dup_a == false);
+        forwarded++;
+        assert(zstr_st2022_7_demux_process(demux, 1, b, &dup_b) == 0);
+        assert(dup_b == true); /* late duplicate dropped */
+
+        av_packet_free(&in);
+        av_packet_free(&a);
+        av_packet_free(&b);
+    }
+    assert(forwarded == 10);
+    assert(zstr_st2022_7_mux_count(mux) == 10);
+
+    /* Path A outage: B-only arrivals still forward (hitless) */
+    for (uint16_t seq = 210; seq < 215; seq++) {
+        AVPacket *in = av_packet_alloc();
+        av_new_packet(in, 20);
+        in->data[0] = 0x80;
+        in->data[2] = (uint8_t)(seq >> 8);
+        in->data[3] = (uint8_t)(seq & 0xFF);
+        AVPacket *a = NULL, *b = NULL;
+        assert(zstr_st2022_7_mux_process(mux, in, &a, &b) == 0);
+        av_packet_free(&a); /* path A lost */
+        bool dup = true;
+        assert(zstr_st2022_7_demux_process(demux, 1, b, &dup) == 0);
+        assert(dup == false);
+        forwarded++;
+        av_packet_free(&in);
+        av_packet_free(&b);
+    }
+    assert(forwarded == 15);
+
+    zstr_st2022_7_mux_free(&mux);
+    zstr_st2022_7_demux_free(&demux);
+    printf("[PASS] ST 2022-7 dual-send mux passed.\n");
+}
+
+static void test_st2110_sdp_roundtrip(void)
+{
+    printf("[TEST] Testing ST 2110 SDP generate + parse...\n");
+
+    zstr_st2110_sdp_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.address, sizeof(cfg.address), "239.10.10.1");
+    snprintf(cfg.session_name, sizeof(cfg.session_name), "zff-test");
+    snprintf(cfg.ptp_address, sizeof(cfg.ptp_address), "192.168.10.1");
+    cfg.ptp_domain = 127;
+    cfg.video_enabled = 1;
+    cfg.video_port = 20000;
+    cfg.video_pt = 96;
+    snprintf(cfg.video_sampling, sizeof(cfg.video_sampling), "YCbCr-4:2:2");
+    cfg.width = 1920;
+    cfg.height = 1080;
+    cfg.depth = 10;
+    cfg.audio_enabled = 1;
+    cfg.audio_port = 20002;
+    cfg.audio_pt = 97;
+    cfg.sample_rate = 48000;
+    cfg.channels = 2;
+    cfg.audio_depth = 24;
+
+    char sdp[4096];
+    int n = zstr_st2110_sdp_generate(&cfg, sdp, sizeof(sdp));
+    assert(n > 0);
+    assert(strstr(sdp, "m=video 20000 RTP/AVP 96") != NULL);
+    assert(strstr(sdp, "a=rtpmap:96 raw/90000") != NULL);
+    assert(strstr(sdp, "a=fmtp:96 sampling=YCbCr-4:2:2;width=1920;height=1080;depth=10") != NULL);
+    assert(strstr(sdp, "m=audio 20002 RTP/AVP 97") != NULL);
+    assert(strstr(sdp, "a=rtpmap:97 L24/48000/2") != NULL);
+    assert(strstr(sdp, "a=mediaclk:direct=0") != NULL);
+    assert(strstr(sdp, "a=ts-refclk:ptp=IEEE1588-2019:192.168.10.1:127") != NULL);
+    assert(strstr(sdp, "c=IN IP4 239.10.10.1") != NULL);
+
+    /* Parse our own output back */
+    zstr_st2110_sdp_config_t back;
+    memset(&back, 0, sizeof(back));
+    assert(zstr_st2110_sdp_parse(sdp, &back) == 0);
+    assert(back.video_enabled && back.video_port == 20000 && back.video_pt == 96);
+    assert(strcmp(back.video_sampling, "YCbCr-4:2:2") == 0);
+    assert(back.width == 1920 && back.height == 1080 && back.depth == 10);
+    assert(back.audio_enabled && back.audio_port == 20002 && back.audio_pt == 97);
+    assert(back.sample_rate == 48000 && back.channels == 2 && back.audio_depth == 24);
+    assert(strcmp(back.address, "239.10.10.1") == 0);
+    assert(strcmp(back.ptp_address, "192.168.10.1") == 0 && back.ptp_domain == 127);
+
+    /* Parse a third-party-style SDP (different order, extra lines, LF-only) */
+    const char *foreign_sdp =
+        "v=0\n"
+        "o=- 12345 1 IN IP4 10.0.0.5\n"
+        "s=Foreign 2110 Sender\n"
+        "c=IN IP4 239.20.20.2\n"
+        "t=0 0\n"
+        "a=tool:vendor-x\n"
+        "a=ts-refclk:ptp=IEEE1588-2019:10.0.0.1:0\n"
+        "m=audio 30002 RTP/AVP 98\n"
+        "a=rtpmap:98 L16/48000/8\n"
+        "a=mediaclk:direct=0\n"
+        "a=ptime:0.125\n"
+        "m=video 30000 RTP/AVP 99\n"
+        "a=rtpmap:99 raw/90000\n"
+        "a=fmtp:99 sampling=RGB;width=1280;height=720;depth=8;interlace\n";
+    memset(&back, 0, sizeof(back));
+    assert(zstr_st2110_sdp_parse(foreign_sdp, &back) == 0);
+    assert(back.audio_enabled && back.audio_port == 30002 && back.audio_pt == 98);
+    assert(back.sample_rate == 48000 && back.channels == 8 && back.audio_depth == 16);
+    assert(back.video_enabled && back.video_port == 30000 && back.video_pt == 99);
+    assert(strcmp(back.video_sampling, "RGB") == 0);
+    assert(back.width == 1280 && back.height == 720 && back.depth == 8);
+    assert(strcmp(back.address, "239.20.20.2") == 0);
+
+    /* Garbage in: no media sections -> error */
+    memset(&back, 0, sizeof(back));
+    assert(zstr_st2110_sdp_parse("v=0\r\ns=empty\r\n", &back) < 0);
+    assert(zstr_st2110_sdp_generate(NULL, sdp, sizeof(sdp)) < 0);
+
+    printf("[PASS] ST 2110 SDP roundtrip passed.\n");
+}
+
 static void test_st2110_device_loopback(void)
 {
     printf("[TEST] Testing ST 2110 FFmpeg Device Loopback (127.0.0.1:25000)...\n");
@@ -718,6 +863,8 @@ int main(int argc, char **argv)
     test_st2110_20_video_roundtrip();
     test_st2110_30_audio_roundtrip();
     test_st2022_7_redundancy();
+    test_st2022_7_mux_dualsend();
+    test_st2110_sdp_roundtrip();
     test_st2110_40_anc_roundtrip();
     test_st2110_21_narrow_pacer();
     test_st2022_5_row_fec();

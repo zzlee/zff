@@ -44,11 +44,12 @@ All elements migrated from `zstreamer` are named with the **`zstr_`** prefix and
 
 | Plugin Name | Type | Original Element | Transplanted Core Algorithm / Feature | Buffer Model | Options (`AVOption`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`zstr_st2110_demux`** | Demuxer | `st2110_20/30/40_depayloader.c` | **ST 2110 multi-stream receiver**; SDP parsing; RFC 4175 video depayloading; ST 2110-30 PCM; ST 2110-40 ANC | UDP ➔ `AVFrame` / `AVPacket` | `sdp_file`, `local_ip`, `ptp_domain`, `buffer_depth_ms` |
-| **`zstr_st2110_mux`** | Muxer | `st2110_20/30/40_payloader.c` | **ST 2110 payloader**; line-based RFC 4175 packetization; IEEE 1588 PTP tagging | `AVFrame` ➔ RTP `AVPacket` | `dest_ip`, `port`, `payload_type`, `sampling`, `packet_pacing` |
+| **`zstr_st2110_demux`** | Demuxer | `st2110_20/30/40_depayloader.c` | **ST 2110 receiver**; raw UDP socket; use `zstr_st2110_sdp_parse` for session setup | UDP ➔ `AVPacket` | `host`, `port` |
+| **`zstr_st2110_mux`** | Muxer | `st2110_20/30/40_payloader.c` | **ST 2110 sender**; raw UDP socket; pair with `zstr_st2110_21` pacer + `zstr_st2110_sdp_generate` | `AVPacket` ➔ UDP | `host`, `port`, `pt` |
+| **`zstr_st2110_sdp`** | Library | `sdp_muxer.c` (st2110 mode) + `sdp_demuxer.c` (line parser) | **ST 2110 SDP generate + parse**; raw/90000 fmtp sampling, L16/L24 + mediaclk, ts-refclk/keywait | SDP text ↔ struct | — (C API) |
 | **`zstr_st2110_21`** | Filter / Pacer | `st2110_21_payloader.c` | **ST 2110-21 traffic shaper**; Narrow (N), Narrow Linear (NL), Wide (W) sender pacing | Intercepts `AVPacket` | `pacer_type`, `c_max`, `vrx_full` |
 | **`zstr_st2110_22`** | Mux / Demux | `st2110_22_payloader.c` | **JPEG-XS constant bitrate streaming**; slice-based packetization | `AVPacket` | `bitrate`, `slice_mode` |
-| **`zstr_st2022_7`** | URLProtocol / Demux | `st2110_redundancy_mux/demux.c` | **SMPTE 2022-7 Hitless Merge**; red/blue dual-network hitless packet deduplication | Dual UDP ➔ Clean `AVPacket` | `primary_ip`, `secondary_ip`, `primary_port`, `secondary_port`, `merge_window` |
+| **`zstr_st2022_7`** | URLProtocol / Demux | `st2110_redundancy_mux/demux.c` | **SMPTE 2022-7 hitless**; mux clones bit-identical A/B copies, demux drops late duplicates | `AVPacket` ↔ dual path | — (C API) |
 | **`zstr_st2022_5_fec`**| Filter / Protocol | `st2110_fec.c` | **SMPTE 2022-5 1D/2D XOR Forward Error Correction** matrix | `AVPacket` | `fec_l`, `fec_d`, `fec_mode` |
 | **`zstr_dante_demux`** | Demuxer | `dante_dep_source.c`, `dep_audio.c` | **Dante / DEP multicast audio receiver**; 24-bit/32-bit float PCM depayload | UDP ➔ `AVFrame` | `session_name`, `channels`, `multicast_ip`, `port`, `latency_us` |
 | **`zstr_dante_mux`** | Muxer | `dante_dep_sink.c`, `dante_udp_sink.c` | **Dante / DEP audio sender**; high-precision timeslot RTP packaging | `AVFrame` ➔ UDP `AVPacket` | `dest_ip`, `port`, `channels`, `flow_id`, `pace-packets` |

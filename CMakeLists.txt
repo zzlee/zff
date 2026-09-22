@@ -130,6 +130,8 @@ set(PLUGINS_SOURCES
     src/plugins/broadcast/zstr_st2110_20.c
     src/plugins/broadcast/zstr_st2110_21.c
     src/plugins/broadcast/zstr_st2110_22.c
+    src/plugins/broadcast/zstr_st2110_sdp.c
+    src/plugins/broadcast/zstr_st2022_7_mux.c
     src/plugins/broadcast/zstr_st2110_30.c
     src/plugins/broadcast/zstr_st2110_40.c
     src/plugins/broadcast/zstr_st2022_5.c

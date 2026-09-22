@@ -94,7 +94,8 @@ Broadcast (`src/plugins/broadcast/`):
 | `zstr_st2110_40` | `st2110_40_*` | ANC packets (ST 344 8-bit mapping), PT 100 |
 | `zstr_st2110_21` | (new; zstreamer's file is a misnamed H264 payloader) | Narrow sender pacer |
 | `zstr_st2110_22` | `st2110_22_*` + RFC 9134 | SVT-JPEG-XS encode/decode (optional dep), codestream RTP |
-| `zstr_st2022_7` | `st2110_redundancy_*` | hitless merge dedup |
+| `zstr_st2022_7` | `st2110_redundancy_*` | dual-send mux (bit-identical A/B) + hitless merge dedup |
+| `zstr_st2110_sdp` | `sdp_muxer` (st2110 mode) + `sdp_demuxer` | SDP generate + parse (raw fmtp, L16/L24, ts-refclk) |
 | `zstr_st2022_5` | (zstreamer's fec is an unimplemented stub) | real row-XOR FEC encode/recovery |
 
 ## Recipes

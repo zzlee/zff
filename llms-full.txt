@@ -97,7 +97,8 @@ Broadcast (`src/plugins/broadcast/`):
 | `zstr_st2110_40` | `st2110_40_*` | ANC packets (ST 344 8-bit mapping), PT 100 |
 | `zstr_st2110_21` | (new; zstreamer's file is a misnamed H264 payloader) | Narrow sender pacer |
 | `zstr_st2110_22` | `st2110_22_*` + RFC 9134 | SVT-JPEG-XS encode/decode (optional dep), codestream RTP |
-| `zstr_st2022_7` | `st2110_redundancy_*` | hitless merge dedup |
+| `zstr_st2022_7` | `st2110_redundancy_*` | dual-send mux (bit-identical A/B) + hitless merge dedup |
+| `zstr_st2110_sdp` | `sdp_muxer` (st2110 mode) + `sdp_demuxer` | SDP generate + parse (raw fmtp, L16/L24, ts-refclk) |
 | `zstr_st2022_5` | (zstreamer's fec is an unimplemented stub) | real row-XOR FEC encode/recovery |
 
 ## Recipes
@@ -468,11 +469,12 @@ All elements migrated from `zstreamer` are named with the **`zstr_`** prefix and
 
 | Plugin Name | Type | Original Element | Transplanted Core Algorithm / Feature | Buffer Model | Options (`AVOption`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`zstr_st2110_demux`** | Demuxer | `st2110_20/30/40_depayloader.c` | **ST 2110 multi-stream receiver**; SDP parsing; RFC 4175 video depayloading; ST 2110-30 PCM; ST 2110-40 ANC | UDP ➔ `AVFrame` / `AVPacket` | `sdp_file`, `local_ip`, `ptp_domain`, `buffer_depth_ms` |
-| **`zstr_st2110_mux`** | Muxer | `st2110_20/30/40_payloader.c` | **ST 2110 payloader**; line-based RFC 4175 packetization; IEEE 1588 PTP tagging | `AVFrame` ➔ RTP `AVPacket` | `dest_ip`, `port`, `payload_type`, `sampling`, `packet_pacing` |
+| **`zstr_st2110_demux`** | Demuxer | `st2110_20/30/40_depayloader.c` | **ST 2110 receiver**; raw UDP socket; use `zstr_st2110_sdp_parse` for session setup | UDP ➔ `AVPacket` | `host`, `port` |
+| **`zstr_st2110_mux`** | Muxer | `st2110_20/30/40_payloader.c` | **ST 2110 sender**; raw UDP socket; pair with `zstr_st2110_21` pacer + `zstr_st2110_sdp_generate` | `AVPacket` ➔ UDP | `host`, `port`, `pt` |
+| **`zstr_st2110_sdp`** | Library | `sdp_muxer.c` (st2110 mode) + `sdp_demuxer.c` (line parser) | **ST 2110 SDP generate + parse**; raw/90000 fmtp sampling, L16/L24 + mediaclk, ts-refclk/keywait | SDP text ↔ struct | — (C API) |
 | **`zstr_st2110_21`** | Filter / Pacer | `st2110_21_payloader.c` | **ST 2110-21 traffic shaper**; Narrow (N), Narrow Linear (NL), Wide (W) sender pacing | Intercepts `AVPacket` | `pacer_type`, `c_max`, `vrx_full` |
 | **`zstr_st2110_22`** | Mux / Demux | `st2110_22_payloader.c` | **JPEG-XS constant bitrate streaming**; slice-based packetization | `AVPacket` | `bitrate`, `slice_mode` |
-| **`zstr_st2022_7`** | URLProtocol / Demux | `st2110_redundancy_mux/demux.c` | **SMPTE 2022-7 Hitless Merge**; red/blue dual-network hitless packet deduplication | Dual UDP ➔ Clean `AVPacket` | `primary_ip`, `secondary_ip`, `primary_port`, `secondary_port`, `merge_window` |
+| **`zstr_st2022_7`** | URLProtocol / Demux | `st2110_redundancy_mux/demux.c` | **SMPTE 2022-7 hitless**; mux clones bit-identical A/B copies, demux drops late duplicates | `AVPacket` ↔ dual path | — (C API) |
 | **`zstr_st2022_5_fec`**| Filter / Protocol | `st2110_fec.c` | **SMPTE 2022-5 1D/2D XOR Forward Error Correction** matrix | `AVPacket` | `fec_l`, `fec_d`, `fec_mode` |
 | **`zstr_dante_demux`** | Demuxer | `dante_dep_source.c`, `dep_audio.c` | **Dante / DEP multicast audio receiver**; 24-bit/32-bit float PCM depayload | UDP ➔ `AVFrame` | `session_name`, `channels`, `multicast_ip`, `port`, `latency_us` |
 | **`zstr_dante_mux`** | Muxer | `dante_dep_sink.c`, `dante_udp_sink.c` | **Dante / DEP audio sender**; high-precision timeslot RTP packaging | `AVFrame` ➔ UDP `AVPacket` | `dest_ip`, `port`, `channels`, `flow_id`, `pace-packets` |
@@ -710,6 +712,8 @@ set(PLUGINS_SOURCES
     src/plugins/broadcast/zstr_st2110_20.c
     src/plugins/broadcast/zstr_st2110_21.c
     src/plugins/broadcast/zstr_st2110_22.c
+    src/plugins/broadcast/zstr_st2110_sdp.c
+    src/plugins/broadcast/zstr_st2022_7_mux.c
     src/plugins/broadcast/zstr_st2110_30.c
     src/plugins/broadcast/zstr_st2110_40.c
     src/plugins/broadcast/zstr_st2022_5.c
@@ -1884,6 +1888,62 @@ extern const FFOutputFormat ff_zstr_st2110_muxer;
 }
 #endif
 
+--- File: include/zff/plugins/zstr_st2110_sdp.h ---
+/*=============================================================================
+    zstr_st2110_sdp.h — SMPTE ST 2110 SDP Generate & Parse (RFC 8866 subset)
+ =============================================================================*/
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * ST 2110 session description. Mirrors the st2110 mode of zstreamer's
+ * sdp_muxer (generate) / sdp_demuxer (parse), minus the framework:
+ * - Video: raw/90000 (-20) with fmtp sampling/width/height/depth.
+ * - Audio: L16/L24 (-30) with mediaclk.
+ * - Session: ts-refclk (PTP), keywait.
+ */
+typedef struct {
+    char address[64];       /**< Stream destination (unicast or multicast IP) */
+    char session_name[64];
+    char ptp_address[64];   /**< PTP grandmaster IP for a=ts-refclk */
+    int ptp_domain;         /**< PTP domain number */
+
+    int video_enabled;
+    int video_port;
+    int video_pt;           /**< RTP payload type (dynamic, e.g. 96) */
+    char video_sampling[16];/**< e.g. "YCbCr-4:2:2", "RGB", "YCbCr-4:4:4" */
+    int width;
+    int height;
+    int depth;              /**< bits per component: 8, 10, 12 */
+
+    int audio_enabled;
+    int audio_port;
+    int audio_pt;
+    int sample_rate;        /**< e.g. 48000 */
+    int channels;           /**< e.g. 2 */
+    int audio_depth;        /**< 16 (L16) or 24 (L24) */
+} zstr_st2110_sdp_config_t;
+
+/** Generate an ST 2110 SDP (CRLF line endings). Returns bytes written (<0 on error). */
+int zstr_st2110_sdp_generate(const zstr_st2110_sdp_config_t *cfg, char *out, size_t out_size);
+
+/**
+ * Parse an ST 2110 SDP into cfg (first video + first audio sections win).
+ * Missing optional fields keep their defaults (caller should zero-init or
+ * pre-fill; depth defaults to 10, see below). Returns 0 on success.
+ */
+int zstr_st2110_sdp_parse(const char *sdp, zstr_st2110_sdp_config_t *out_cfg);
+
+#ifdef __cplusplus
+}
+#endif
+
 --- File: include/zff/plugins/zstr_st2110_toolkit.h ---
 /*=============================================================================
     zstr_st2110_toolkit.h — SMPTE ST 2110-20/30 & ST 2022-7 Protocol Processing Toolkit
@@ -2107,6 +2167,23 @@ int zstr_st2022_7_demux_process(zstr_st2022_7_demux_t *s,
                                 const AVPacket *in_pkt,
                                 bool *is_duplicate);
 void zstr_st2022_7_demux_free(zstr_st2022_7_demux_t **s);
+
+/* ---------------------------------------------------------------------------
+ * SMPTE ST 2022-7: Seamless Redundancy Sender (dual-send mux)
+ * --------------------------------------------------------------------------- */
+typedef struct zstr_st2022_7_mux zstr_st2022_7_mux_t;
+
+zstr_st2022_7_mux_t *zstr_st2022_7_mux_create(void);
+/**
+ * Clone in_pkt into out_a (primary) and out_b (secondary); both owned by
+ * the caller. The copies are bit-identical per ST 2022-7.
+ */
+int zstr_st2022_7_mux_process(zstr_st2022_7_mux_t *s,
+                              const AVPacket *in_pkt,
+                              AVPacket **out_a,
+                              AVPacket **out_b);
+uint64_t zstr_st2022_7_mux_count(const zstr_st2022_7_mux_t *s);
+void zstr_st2022_7_mux_free(zstr_st2022_7_mux_t **ps);
 
 #ifdef __cplusplus
 }

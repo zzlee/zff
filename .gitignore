@@ -27,3 +27,4 @@ Makefile
 tmp/
 scratch/
 build*/
+__pycache__/

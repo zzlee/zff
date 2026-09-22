@@ -38,12 +38,52 @@ fi
 echo "==> Build dependencies"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
-    build-essential cmake ninja-build pkg-config \
+    build-essential cmake ninja-build pkg-config nasm yasm git \
     libavformat-dev libavcodec-dev libavfilter-dev libavutil-dev \
     libavdevice-dev libswscale-dev libswresample-dev \
     libasound2-dev libgl1-mesa-dev libx11-dev libxext-dev \
     libfreetype-dev libsrt-gnutls-dev xxd > /dev/null
 echo "    deps installed"
+
+# zff needs FFmpeg >= 6.1 (ch_layout, AVFrame.time_base). Kaggle's
+# Ubuntu 22.04 ships 4.4, so build 6.1 from source when system is old.
+# Includes nv-codec-headers for NVENC; CUDA toolkit is preinstalled.
+FFMPEG_PREFIX="/opt/zff-ffmpeg"
+need_ffmpeg_build() {
+    pkg-config --atleast-version=58 libavutil 2>/dev/null || return 0
+    return 1
+}
+if need_ffmpeg_build; then
+    echo "==> System FFmpeg too old; building FFmpeg 6.1 from source (~10 min)"
+    if [ -x /usr/local/cuda/bin/nvcc ]; then
+        export PATH="/usr/local/cuda/bin:${PATH}"
+    fi
+    sudo mkdir -p "${FFMPEG_PREFIX}" /tmp/zffdeps
+    sudo chown -R "$(id -u):$(id -g)" "${FFMPEG_PREFIX}" /tmp/zffdeps
+    cd /tmp/zffdeps
+    if [ ! -d nv-codec-headers ]; then
+        git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+    fi
+    make -C nv-codec-headers PREFIX="${FFMPEG_PREFIX}" install
+    if [ ! -d ffmpeg-6.1.2 ]; then
+        curl -fsSL -o ffmpeg-6.1.2.tar.xz https://ffmpeg.org/releases/ffmpeg-6.1.2.tar.xz
+        tar xf ffmpeg-6.1.2.tar.xz
+    fi
+    cd ffmpeg-6.1.2
+    ./configure --prefix="${FFMPEG_PREFIX}" \
+        --disable-static --enable-shared --disable-doc --disable-debug \
+        --enable-cuda --enable-cuvid --enable-nvenc \
+        --extra-cflags="-I${FFMPEG_PREFIX}/include" \
+        --extra-ldflags="-L${FFMPEG_PREFIX}/lib" > /tmp/zffdeps/ffconfig.log 2>&1 \
+        || { echo "FFmpeg configure failed:"; tail -n 20 /tmp/zffdeps/ffconfig.log; exit 1; }
+    make -j"$(nproc)" > /tmp/zffdeps/ffbuild.log 2>&1 \
+        || { echo "FFmpeg build failed:"; tail -n 20 /tmp/zffdeps/ffbuild.log; exit 1; }
+    make install > /tmp/zffdeps/ffinstall.log 2>&1
+    cd "${WORKDIR:-/kaggle/working/zff}"
+    export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+    echo "    FFmpeg $(pkg-config --modversion libavutil) ready at ${FFMPEG_PREFIX}"
+fi
 
 echo "==> Source"
 if [ -d "${WORKDIR}/.git" ]; then

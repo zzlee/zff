@@ -29,8 +29,11 @@ NVENC/NVDEC on free GPUs lack AV1 encode).
    ```
 
 `scripts/kaggle-cuda-test.sh` does: `nvidia-smi` check → system-ffmpeg
-NVENC smoke test → apt build deps → clone/pull → native cmake build of
-`test_hwaccel_cuda` only → run it. Reruns reuse `/kaggle/working/zff`.
+NVENC smoke test → apt build deps → FFmpeg 6.1 source build **only if
+system libavutil < 58** (Kaggle's Ubuntu 22.04 ships 4.4; zff requires
+≥ 6.1 for `ch_layout`/`AVFrame.time_base`, enforced by CMake version
+floors) → clone/pull → native cmake build of `test_hwaccel_cuda`
+only → run it. Reruns reuse `/kaggle/working/zff`.
 
 ## Path B — full CLI from this machine (no browser)
 

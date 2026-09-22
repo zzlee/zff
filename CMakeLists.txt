@@ -344,11 +344,14 @@ if(BUILD_TESTS)
     add_test(NAME test_srt COMMAND test_srt)
 
     add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
-    target_link_libraries(test_hwaccel_vaapi PRIVATE zff-plugins zff-core)
+    # NOTE: links zff-core only (not zff-plugins): these tests exercise
+    # native libav* HW APIs and must not inherit the GL/X11 link closure,
+    # whose distro/NVIDIA skew breaks exe links on GPU boxes.
+    target_link_libraries(test_hwaccel_vaapi PRIVATE zff-core)
     add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
 
     add_executable(test_hwaccel_cuda tests/test_hwaccel_cuda.c)
-    target_link_libraries(test_hwaccel_cuda PRIVATE zff-plugins zff-core)
+    target_link_libraries(test_hwaccel_cuda PRIVATE zff-core)
     add_test(NAME test_hwaccel_cuda COMMAND test_hwaccel_cuda)
 endif()
 

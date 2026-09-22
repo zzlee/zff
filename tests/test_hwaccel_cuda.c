@@ -252,8 +252,6 @@ int main(void)
     printf("        Running CUDA HW Integration Tests           \n");
     printf("====================================================\n");
 
-    zff_plugins_register_all();
-
     if (av_hwdevice_ctx_create(&g_dev, AV_HWDEVICE_TYPE_CUDA,
                                NULL, NULL, 0) < 0) {
         printf("[SKIP] No CUDA device; skipping HW tests.\n");

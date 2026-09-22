@@ -277,8 +277,6 @@ int main(void)
     printf("        Running VAAPI HW Integration Tests          \n");
     printf("====================================================\n");
 
-    zff_plugins_register_all();
-
     if (try_open_device() < 0) {
         printf("[SKIP] No VAAPI device (/dev/dri); skipping HW tests.\n");
         printf("====================================================\n");

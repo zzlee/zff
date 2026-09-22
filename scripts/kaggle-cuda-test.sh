@@ -73,7 +73,7 @@ if need_ffmpeg_build; then
         tar xf ffmpeg-6.1.2.tar.xz
     fi
     cd ffmpeg-6.1.2
-    ./configure --prefix="${FFMPEG_PREFIX}" \
+    ./configure --prefix="${FFMPEG_PREFIX}" --libdir="${FFMPEG_PREFIX}/lib" \
         --disable-static --enable-shared --disable-doc --disable-debug \
         --enable-cuda --enable-cuvid --enable-nvenc \
         --extra-cflags="-I${FFMPEG_PREFIX}/include" \
@@ -82,6 +82,9 @@ if need_ffmpeg_build; then
     make -j"$(nproc)" > /tmp/zffdeps/ffbuild.log 2>&1 \
         || { echo "FFmpeg build failed:"; tail -n 20 /tmp/zffdeps/ffbuild.log; exit 1; }
     make install > /tmp/zffdeps/ffinstall.log 2>&1
+    # Sanity: the versioned .so must exist exactly where the .pc points
+    ls "${FFMPEG_PREFIX}/lib/libavutil.so."* > /dev/null \
+        || { echo "FFmpeg install layout unexpected:"; ls "${FFMPEG_PREFIX}"; ls "${FFMPEG_PREFIX}"/lib* 2>/dev/null; exit 1; }
     cd /tmp/zffdeps
     echo "    FFmpeg $(pkg-config --modversion libavutil) ready at ${FFMPEG_PREFIX}"
 fi

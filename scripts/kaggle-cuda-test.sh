@@ -26,6 +26,15 @@ nvidia-smi --query-gpu=name,driver_version --format=csv || {
     exit 1
 }
 
+echo "==> Step 0: system ffmpeg NVENC smoke test (non-fatal)"
+if command -v ffmpeg >/dev/null 2>&1; then
+    ffmpeg -hide_banner -y -v error \
+        -f lavfi -i testsrc=size=320x240:rate=30:duration=1 \
+        -c:v h264_nvenc -f null - 2>&1 | head -n 5 || true
+else
+    echo "    (no system ffmpeg; skipping smoke test)"
+fi
+
 echo "==> Build dependencies"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \

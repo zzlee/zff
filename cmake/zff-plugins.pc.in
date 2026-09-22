@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: zff-plugins
+Description: zff zstr_* FFmpeg plugin ecosystem
+Version: @ZFF_VERSION@
+Requires: zff-core
+Libs: -L${libdir} -lzff-plugins
+Cflags: -I${includedir}

@@ -3,8 +3,10 @@
 # Usage: ./scripts/package.sh [version]   (default: ./scripts/version.sh get)
 #
 # Produces dist/zff-<version>-linux-x86_64.tar.gz containing:
-#   lib/{libzff-core.so*, libzff-plugins.so*}, include/zff/,
+#   usr/{lib/libzff-*.so*, include/zff/, lib/{cmake,pkgconfig}},
 #   docs (README/ARCHITECTURE/ELEMENTS/ROADMAP/llms*), examples/webrtc_page.
+# NOTE: prefix=/ triggers GNUInstallDirs usrmerge rewriting (usr/lib);
+# prefix=/usr keeps the standard FHS staging layout.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,16 +40,24 @@ docker run --rm \
     "${IMAGE}" \
     bash -c "
         set -euo pipefail
-        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF .. &&
+        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib .. &&
         ninja zff-core zff-plugins demo_webrtc_page
     "
 
-echo "==> Staging..."
+echo "==> Installing to stage via cmake --install..."
 STAGE_ABS="${REPO_ROOT}/${STAGE}/zff-${VERSION}-linux-x86_64"
-mkdir -p "${STAGE_ABS}/lib" "${STAGE_ABS}/include" "${STAGE_ABS}/examples/webrtc_page"
-cp "${REPO_ROOT}/${PKG_BUILD_DIR}/libzff-core.so"* "${STAGE_ABS}/lib/"
-cp "${REPO_ROOT}/${PKG_BUILD_DIR}/libzff-plugins.so"* "${STAGE_ABS}/lib/"
-cp -r "${REPO_ROOT}/include/zff" "${STAGE_ABS}/include/"
+mkdir -p "${STAGE_ABS}/examples/webrtc_page"
+docker run --rm \
+    -u "$(id -u):$(id -g)" \
+    -v "${REPO_ROOT}:/workspace" \
+    -w "/workspace/${PKG_BUILD_DIR}" \
+    "${IMAGE}" \
+    bash -c "
+        set -euo pipefail
+        DESTDIR=/workspace/${STAGE}/zff-${VERSION}-linux-x86_64 \
+            cmake --install .
+    "
 for doc in README.md ARCHITECTURE.md ELEMENTS.md ROADMAP.md llms.txt llms-full.txt VERSION; do
     cp "${REPO_ROOT}/${doc}" "${STAGE_ABS}/"
 done

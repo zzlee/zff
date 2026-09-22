@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+# Transitive dependency available only as an imported target when zff was
+# built against a CMake-config libdatachannel (not pkg-config).
+if(@ZFF_USES_LDC_CONFIG@)
+    include(CMakeFindDependencyMacro)
+    find_dependency(LibDataChannel)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/zffTargets.cmake")
+
+check_required_components(zff)

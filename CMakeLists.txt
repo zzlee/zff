@@ -6,6 +6,9 @@ if(NOT ZFF_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
 endif()
 project(zff VERSION "${ZFF_VERSION}" LANGUAGES C)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -84,6 +87,16 @@ set(CORE_SOURCES
 
 add_library(zff-core ${CORE_SOURCES})
 
+set_target_properties(zff-core PROPERTIES
+    VERSION "${ZFF_VERSION}"
+    SOVERSION "${PROJECT_VERSION_MAJOR}"
+)
+
+target_include_directories(zff-core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
 target_link_libraries(zff-core
     PUBLIC
     ${AVUTIL_LIBRARIES}
@@ -144,8 +157,19 @@ endif()
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
 
+set_target_properties(zff-plugins PROPERTIES
+    VERSION "${ZFF_VERSION}"
+    SOVERSION "${PROJECT_VERSION_MAJOR}"
+)
+
+target_include_directories(zff-plugins PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
 if(HAS_WEBRTC)
     if(LibDataChannel_FOUND)
+        set(ZFF_USES_LDC_CONFIG TRUE)
         get_target_property(_ldc_includes LibDataChannel::LibDataChannel INTERFACE_INCLUDE_DIRECTORIES)
         if(_ldc_includes)
             target_include_directories(zff-plugins PRIVATE ${_ldc_includes})
@@ -299,3 +323,50 @@ message(STATUS "zff configured successfully.")
 
 # Examples (manual demos, not part of ctest)
 add_subdirectory(examples)
+
+# --- Install rules -----------------------------------------------------------
+# Libraries + export set for find_package(zff)
+install(TARGETS zff-core zff-plugins
+    EXPORT zffTargets
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+)
+
+install(DIRECTORY include/zff
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+)
+
+install(EXPORT zffTargets
+    FILE zffTargets.cmake
+    NAMESPACE zff::
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/zff"
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zffConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/zffConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/zff"
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/zffConfigVersion.cmake"
+    VERSION "${ZFF_VERSION}"
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/zffConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/zffConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/zff"
+)
+
+# pkg-config files
+configure_file(cmake/zff-core.pc.in zff-core.pc @ONLY)
+configure_file(cmake/zff-plugins.pc.in zff-plugins.pc @ONLY)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/zff-core.pc"
+    "${CMAKE_CURRENT_BINARY_DIR}/zff-plugins.pc"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig"
+)

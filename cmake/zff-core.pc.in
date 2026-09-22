@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: zff-core
+Description: zff core SDK (hardware bridge, time, plugin registry)
+Version: @ZFF_VERSION@
+Libs: -L${libdir} -lzff-core
+Cflags: -I${includedir}

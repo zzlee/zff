@@ -21,6 +21,8 @@ extern "C" {
  * Supported AVDictionary options:
  *   - "host": string (Bind IP address)
  *   - "port": int (Bind UDP port)
+ *   - "sdp_file": string (ST 2110 SDP path; when present, the session
+ *     address/port and video/audio stream geometry come from the file)
  */
 extern const AVInputFormat ff_zstr_st2110_demuxer;
 
@@ -38,6 +40,7 @@ extern const AVInputFormat ff_zstr_st2110_demuxer;
  *   - "host": string (Destination IP address)
  *   - "port": int (Destination UDP port)
  *   - "pt": int (RTP Payload Type: 96 for video, 97 for audio)
+ *   - "sdp_file": string (write an ST 2110 SDP describing this sender)
  */
 extern const FFOutputFormat ff_zstr_st2110_muxer;
 

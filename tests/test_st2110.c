@@ -795,6 +795,115 @@ static void test_st2110_sdp_roundtrip(void)
     printf("[PASS] ST 2110 SDP roundtrip passed.\n");
 }
 
+static void test_st2110_sdp_device_handoff(void)
+{
+    printf("[TEST] Testing ST 2110 SDP device handoff (mux emits, demux builds)...\n");
+
+    char sdp_path[] = "/tmp/zstr_st2110_sdp_XXXXXX";
+    int fd = mkstemp(sdp_path);
+    assert(fd >= 0);
+    close(fd);
+
+    /* Mux side: video stream + sdp_file; header emits the SDP */
+    const AVOutputFormat *out_fmt = zff_find_output_format("zstr_st2110_mux");
+    assert(out_fmt != NULL);
+    AVFormatContext *out_ctx = NULL;
+    assert(avformat_alloc_output_context2(&out_ctx, out_fmt, "zstr_st2110_mux",
+                                          "udp://127.0.0.1:25100") >= 0);
+    AVStream *vst = avformat_new_stream(out_ctx, NULL);
+    assert(vst != NULL);
+    vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    vst->codecpar->width = 1280;
+    vst->codecpar->height = 720;
+    vst->codecpar->format = AV_PIX_FMT_UYVY422;
+    AVDictionary *mux_opts = NULL;
+    av_dict_set(&mux_opts, "sdp_file", sdp_path, 0);
+    assert(avformat_write_header(out_ctx, &mux_opts) >= 0);
+    av_dict_free(&mux_opts);
+
+    /* SDP file describes the sender */
+    FILE *f = fopen(sdp_path, "r");
+    assert(f != NULL);
+    char sdp_text[4096];
+    size_t n = fread(sdp_text, 1, sizeof(sdp_text) - 1, f);
+    fclose(f);
+    sdp_text[n] = '\0';
+    assert(strstr(sdp_text, "m=video 25100 RTP/AVP 96") != NULL);
+    assert(strstr(sdp_text, "width=1280;height=720;depth=8") != NULL);
+    assert(strstr(sdp_text, "c=IN IP4 127.0.0.1") != NULL);
+
+    /* Demux side: streams built from the same SDP file */
+    const AVInputFormat *in_fmt = zff_find_input_format("zstr_st2110_demux");
+    assert(in_fmt != NULL);
+    AVFormatContext *in_ctx = NULL;
+    AVDictionary *demux_opts = NULL;
+    av_dict_set(&demux_opts, "sdp_file", sdp_path, 0);
+    assert(avformat_open_input(&in_ctx, "udp://127.0.0.1:25100", in_fmt, &demux_opts) == 0);
+    av_dict_free(&demux_opts);
+    assert(in_ctx->nb_streams == 1);
+    assert(in_ctx->streams[0]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
+    assert(in_ctx->streams[0]->codecpar->width == 1280);
+    assert(in_ctx->streams[0]->codecpar->height == 720);
+    assert(in_ctx->streams[0]->codecpar->format == AV_PIX_FMT_UYVY422);
+
+    /* Loopback one packet through the SDP-configured pair */
+    AVPacket *tx = av_packet_alloc();
+    av_new_packet(tx, 64);
+    memset(tx->data, 0x5A, 64);
+    tx->stream_index = 0;
+    assert(av_write_frame(out_ctx, tx) == 0);
+    av_packet_free(&tx);
+
+    AVPacket *rx = av_packet_alloc();
+    assert(av_read_frame(in_ctx, rx) == 0);
+    assert(rx->size == 64 && rx->data[0] == 0x5A);
+    av_packet_free(&rx);
+
+    av_write_trailer(out_ctx);
+    avformat_free_context(out_ctx);
+    avformat_close_input(&in_ctx);
+
+    /* Audio-only SDP: hand-built dual session, demux builds both streams */
+    zstr_st2110_sdp_config_t dual;
+    memset(&dual, 0, sizeof(dual));
+    snprintf(dual.address, sizeof(dual.address), "127.0.0.1");
+    dual.video_enabled = 1;
+    dual.video_port = 25200;
+    dual.video_pt = 96;
+    snprintf(dual.video_sampling, sizeof(dual.video_sampling), "RGB");
+    dual.width = 640;
+    dual.height = 480;
+    dual.depth = 8;
+    dual.audio_enabled = 1;
+    dual.audio_port = 25202;
+    dual.audio_pt = 97;
+    dual.sample_rate = 48000;
+    dual.channels = 2;
+    dual.audio_depth = 16;
+    char dual_text[4096];
+    assert(zstr_st2110_sdp_generate(&dual, dual_text, sizeof(dual_text)) > 0);
+    f = fopen(sdp_path, "w");
+    assert(f != NULL);
+    fputs(dual_text, f);
+    fclose(f);
+
+    in_ctx = NULL;
+    demux_opts = NULL;
+    av_dict_set(&demux_opts, "sdp_file", sdp_path, 0);
+    assert(avformat_open_input(&in_ctx, "udp://127.0.0.1:25200", in_fmt, &demux_opts) == 0);
+    av_dict_free(&demux_opts);
+    assert(in_ctx->nb_streams == 2);
+    assert(in_ctx->streams[0]->codecpar->width == 640);
+    assert(in_ctx->streams[0]->codecpar->format == AV_PIX_FMT_RGB24);
+    assert(in_ctx->streams[1]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO);
+    assert(in_ctx->streams[1]->codecpar->codec_id == AV_CODEC_ID_PCM_S16BE);
+    assert(in_ctx->streams[1]->codecpar->sample_rate == 48000);
+    avformat_close_input(&in_ctx);
+
+    unlink(sdp_path);
+    printf("[PASS] ST 2110 SDP device handoff passed.\n");
+}
+
 static void test_st2110_device_loopback(void)
 {
     printf("[TEST] Testing ST 2110 FFmpeg Device Loopback (127.0.0.1:25000)...\n");
@@ -865,6 +974,7 @@ int main(int argc, char **argv)
     test_st2022_7_redundancy();
     test_st2022_7_mux_dualsend();
     test_st2110_sdp_roundtrip();
+    test_st2110_sdp_device_handoff();
     test_st2110_40_anc_roundtrip();
     test_st2110_21_narrow_pacer();
     test_st2022_5_row_fec();

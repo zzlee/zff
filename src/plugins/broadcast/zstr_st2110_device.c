@@ -5,12 +5,14 @@
 
 #include "zff/plugins/zstr_st2110.h"
 #include "zff/plugins/zstr_st2110_toolkit.h"
+#include "zff/plugins/zstr_st2110_sdp.h"
 #include "zff/plugins/zstr_net.h"
 #include "../streaming/zstr_net_internal.h"
 #include "zff/zff_core.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <libavutil/opt.h>
@@ -21,6 +23,7 @@ typedef struct ST2110MuxContext {
     char *host;
     int port;
     int payload_type;
+    char *sdp_file;
     zstr_net_sink_t *net_sink;
     zstr_st2110_20_payloader_t *pay20;
     zstr_st2110_30_payloader_t *pay30;
@@ -34,6 +37,7 @@ static const AVOption zstr_st2110_mux_options[] = {
     { "host", "Destination IP address", OFFSET_M(host), AV_OPT_TYPE_STRING, { .str = "127.0.0.1" }, 0, 0, ENC },
     { "port", "Destination UDP port",    OFFSET_M(port), AV_OPT_TYPE_INT,    { .i64 = 20000 },       0, 65535, ENC },
     { "pt",   "RTP Payload Type",        OFFSET_M(payload_type), AV_OPT_TYPE_INT, { .i64 = 96 },     0, 127, ENC },
+    { "sdp_file", "Write ST 2110 SDP to this path at write_header", OFFSET_M(sdp_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
     { NULL }
 };
 
@@ -96,6 +100,53 @@ static int st2110_write_header(AVFormatContext *s)
         ctx->pay20 = zstr_st2110_20_payloader_create(&v_cfg);
     }
 
+    /* Emit ST 2110 SDP describing this sender (interop handoff) */
+    if (ctx->sdp_file && ctx->sdp_file[0]) {
+        zstr_st2110_sdp_config_t sdp_cfg;
+        memset(&sdp_cfg, 0, sizeof(sdp_cfg));
+        snprintf(sdp_cfg.address, sizeof(sdp_cfg.address), "%s", dest_host);
+        snprintf(sdp_cfg.session_name, sizeof(sdp_cfg.session_name), "zff-st2110");
+        if (s->nb_streams > 0) {
+            AVCodecParameters *cp = s->streams[0]->codecpar;
+            if (cp->codec_type == AVMEDIA_TYPE_AUDIO) {
+                sdp_cfg.audio_enabled = 1;
+                sdp_cfg.audio_port = dest_port;
+                sdp_cfg.audio_pt = ctx->payload_type ? ctx->payload_type : 97;
+                sdp_cfg.sample_rate = cp->sample_rate > 0 ? cp->sample_rate : 48000;
+                sdp_cfg.channels = cp->ch_layout.nb_channels > 0 ?
+                                   cp->ch_layout.nb_channels : 2;
+                sdp_cfg.audio_depth = (cp->codec_id == AV_CODEC_ID_PCM_S24BE) ? 24 : 16;
+            } else {
+                sdp_cfg.video_enabled = 1;
+                sdp_cfg.video_port = dest_port;
+                sdp_cfg.video_pt = ctx->payload_type ? ctx->payload_type : 96;
+                sdp_cfg.width = cp->width > 0 ? cp->width : 1920;
+                sdp_cfg.height = cp->height > 0 ? cp->height : 1080;
+                sdp_cfg.depth = 10;
+                snprintf(sdp_cfg.video_sampling, sizeof(sdp_cfg.video_sampling),
+                         "YCbCr-4:2:2");
+                if (cp->format == AV_PIX_FMT_RGB24) {
+                    snprintf(sdp_cfg.video_sampling, sizeof(sdp_cfg.video_sampling), "RGB");
+                    sdp_cfg.depth = 8;
+                } else if (cp->format == AV_PIX_FMT_UYVY422) {
+                    sdp_cfg.depth = 8;
+                }
+            }
+        }
+        char sdp_text[4096];
+        int n = zstr_st2110_sdp_generate(&sdp_cfg, sdp_text, sizeof(sdp_text));
+        if (n > 0) {
+            FILE *f = fopen(ctx->sdp_file, "w");
+            if (f) {
+                fwrite(sdp_text, 1, (size_t)n, f);
+                fclose(f);
+            } else {
+                av_log(s, AV_LOG_WARNING, "zstr_st2110_mux: cannot write sdp_file %s\n",
+                       ctx->sdp_file);
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -145,6 +196,7 @@ typedef struct ST2110DemuxContext {
     const AVClass *av_class;
     char *host;
     int port;
+    char *sdp_file;
     zstr_net_source_t *net_src;
 } ST2110DemuxContext;
 
@@ -154,6 +206,7 @@ typedef struct ST2110DemuxContext {
 static const AVOption zstr_st2110_demux_options[] = {
     { "host", "Bind IP address", OFFSET_D(host), AV_OPT_TYPE_STRING, { .str = "0.0.0.0" }, 0, 0, DEC },
     { "port", "Bind UDP port",   OFFSET_D(port), AV_OPT_TYPE_INT,    { .i64 = 20000 },     0, 65535, DEC },
+    { "sdp_file", "Read ST 2110 SDP from this path to build streams (port/address)", OFFSET_D(sdp_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
     { NULL }
 };
 
@@ -193,8 +246,75 @@ static int st2110_read_header(AVFormatContext *s)
         .buffer_size = 65536,
         .timeout_ms = 1000
     };
+
+    /* SDP-driven stream setup: parse the session file for ports/address
+     * and stream geometry. The single-socket device binds the video port
+     * (or the audio port when video is absent). */
+    zstr_st2110_sdp_config_t sdp_cfg;
+    bool have_sdp = false;
+    memset(&sdp_cfg, 0, sizeof(sdp_cfg));
+    if (ctx->sdp_file && ctx->sdp_file[0]) {
+        FILE *f = fopen(ctx->sdp_file, "r");
+        if (f) {
+            char sdp_text[8192];
+            size_t n = fread(sdp_text, 1, sizeof(sdp_text) - 1, f);
+            fclose(f);
+            sdp_text[n] = '\0';
+            if (n > 0 && zstr_st2110_sdp_parse(sdp_text, &sdp_cfg) == 0) {
+                have_sdp = true;
+                if (sdp_cfg.video_enabled) bind_port = (uint16_t)sdp_cfg.video_port;
+                else if (sdp_cfg.audio_enabled) bind_port = (uint16_t)sdp_cfg.audio_port;
+                cfg.port = bind_port;
+                /* SDP multicast address: let net_source join the group */
+                if (sdp_cfg.address[0]) {
+                    snprintf(host_buf, sizeof(host_buf), "%s", sdp_cfg.address);
+                    bind_host = host_buf;
+                    cfg.host = bind_host;
+                }
+            } else {
+                av_log(s, AV_LOG_WARNING,
+                       "zstr_st2110_demux: cannot parse sdp_file %s, using host/port\n",
+                       ctx->sdp_file);
+            }
+        } else {
+            av_log(s, AV_LOG_WARNING,
+                   "zstr_st2110_demux: cannot open sdp_file %s, using host/port\n",
+                   ctx->sdp_file);
+        }
+    }
+
     ctx->net_src = zstr_net_source_create(&cfg);
     if (!ctx->net_src) return AVERROR(EIO);
+
+    if (have_sdp) {
+        if (sdp_cfg.video_enabled) {
+            AVStream *st = avformat_new_stream(s, NULL);
+            if (!st) return AVERROR(ENOMEM);
+            st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            st->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
+            st->codecpar->width = sdp_cfg.width > 0 ? sdp_cfg.width : 1920;
+            st->codecpar->height = sdp_cfg.height > 0 ? sdp_cfg.height : 1080;
+            /* sampling -> pixel format (conservative subset) */
+            if (strcasecmp(sdp_cfg.video_sampling, "RGB") == 0)
+                st->codecpar->format = AV_PIX_FMT_RGB24;
+            else
+                st->codecpar->format = AV_PIX_FMT_UYVY422; /* YCbCr-4:2:2 default */
+            st->time_base = (AVRational){ 1, 90000 };
+        }
+        if (sdp_cfg.audio_enabled) {
+            AVStream *st = avformat_new_stream(s, NULL);
+            if (!st) return AVERROR(ENOMEM);
+            st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+            st->codecpar->codec_id = (sdp_cfg.audio_depth == 24) ?
+                                     AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S16BE;
+            st->codecpar->sample_rate = sdp_cfg.sample_rate > 0 ?
+                                        sdp_cfg.sample_rate : 48000;
+            av_channel_layout_default(&st->codecpar->ch_layout,
+                                      sdp_cfg.channels > 0 ? sdp_cfg.channels : 2);
+            st->time_base = (AVRational){ 1, st->codecpar->sample_rate };
+        }
+        return 0;
+    }
 
     AVStream *st = avformat_new_stream(s, NULL);
     if (!st) return AVERROR(ENOMEM);

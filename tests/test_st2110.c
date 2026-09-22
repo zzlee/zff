@@ -594,6 +594,217 @@ static void test_st2110_22_rfc9134_roundtrip(void)
     printf("[PASS] ST 2110-22 RFC 9134 roundtrip passed.\n");
 }
 
+static void test_st2110_22_slice_rtp(void)
+{
+    printf("[TEST] Testing ST 2110-22 slice mode (K=1) RTP...\n");
+
+    zstr_st2110_22_payloader_t *pay =
+        zstr_st2110_22_payloader_create(&(zstr_st2110_22_config_t){
+            .payload_type = 96, .ssrc = 0x21102202, .mtu = 256 });
+    zstr_st2110_22_depayloader_t *depay =
+        zstr_st2110_22_depayloader_create(&(zstr_st2110_22_config_t){
+            .payload_type = 96 });
+    assert(pay != NULL && depay != NULL);
+
+    /* Synthetic units: header + 3 slices (multi-packet at mtu 256) */
+    uint8_t hdr[200], sl[3][600];
+    hdr[0] = 0xFF; hdr[1] = 0x10;
+    for (int i = 2; i < 200; i++) hdr[i] = (uint8_t)i;
+    for (int sli = 0; sli < 3; sli++) {
+        sl[sli][0] = 0xFF; sl[sli][1] = 0x22; /* SLH-ish */
+        for (int i = 2; i < 600; i++) sl[sli][i] = (uint8_t)(sli * 40 + i);
+    }
+
+    const uint8_t *udata[4] = { hdr, sl[0], sl[1], sl[2] };
+    int ulen[4] = { 200, 600, 600, 600 };
+    int seps[4] = { 0x7FF, 0, 1, 2 };
+
+    AVPacket *units[4];
+    for (int i = 0; i < 4; i++) {
+        units[i] = av_packet_alloc();
+        av_new_packet(units[i], ulen[i]);
+        memcpy(units[i]->data, udata[i], ulen[i]);
+        units[i]->pts = 270000;
+        units[i]->time_base = (AVRational){ 1, 90000 };
+    }
+
+    /* Packetize all units; last one gets EOC appended (SVT gap) */
+    AVPacket *rtp_all[64];
+    int nrtp = 0;
+    for (int i = 0; i < 4; i++) {
+        AVPacket **arr = NULL;
+        int n = 0;
+        int ret = zstr_st2110_22_payloader_process_unit(
+            pay, units[i], seps[i], i == 3, &arr, &n);
+        assert(ret == 0 && n > 0);
+        for (int k = 0; k < n; k++) rtp_all[nrtp++] = arr[k];
+        free(arr);
+    }
+
+    /* Header unit 200B -> 1 packet; slices 600B over 240B payloads -> 3 each */
+    assert(nrtp == 1 + 3 * 3);
+
+    /* Bit-level checks across the stream */
+    int pos = 0;
+    for (int i = 0; i < 4; i++) {
+        int per = (i == 0) ? 1 : 3;
+        for (int k = 0; k < per; k++) {
+            uint8_t *d = rtp_all[pos++]->data;
+            assert((d[0] >> 6) == 2);
+            bool m = (d[1] & 0x80) != 0;
+            bool last_unit = (i == 3);
+            bool last_of_unit = (k == per - 1);
+            assert(m == (last_unit && last_of_unit)); /* M = frame end only */
+            assert((d[12] & 0x80) != 0);              /* T */
+            assert((d[12] & 0x40) != 0);              /* K = slice mode */
+            assert(((d[12] & 0x20) != 0) == last_of_unit); /* L = unit end */
+            assert((d[12] & 0x18) == 0);              /* I */
+            assert((d[12] & 0x1F) == 0);              /* F counter 0 */
+            int sep = (d[13] << 3) | ((d[14] >> 5) & 0x07);
+            assert(sep == seps[i]);
+            int p = ((d[14] & 0x1F) << 8) | d[15];
+            assert(p == k);
+        }
+    }
+
+    /* Last packet carries appended EOC (ff 11) */
+    {
+        AVPacket *last = rtp_all[nrtp - 1];
+        assert(last->data[last->size - 2] == 0xFF);
+        assert(last->data[last->size - 1] == 0x11);
+    }
+
+    /* Depacketize back to units */
+    AVPacket *got[4];
+    int ngot = 0;
+    bool ends[4];
+    for (int i = 0; i < nrtp; i++) {
+        AVPacket *u = av_packet_alloc();
+        bool ready = false, fend = false;
+        int ret = zstr_st2110_22_depayloader_process_unit(depay, rtp_all[i],
+                                                          u, &ready, &fend);
+        assert(ret == 0);
+        if (ready) {
+            got[ngot] = u;
+            ends[ngot] = fend;
+            ngot++;
+        } else {
+            av_packet_free(&u);
+        }
+    }
+    assert(ngot == 4);
+    assert(!ends[0] && !ends[1] && !ends[2] && ends[3]); /* M on last only */
+    for (int i = 0; i < 3; i++) {
+        assert(got[i]->size == ulen[i]);
+        assert(memcmp(got[i]->data, udata[i], ulen[i]) == 0);
+    }
+    /* Last unit = slice + appended EOC */
+    assert(got[3]->size == ulen[3] + 2);
+    assert(memcmp(got[3]->data, udata[3], ulen[3]) == 0);
+    assert(got[3]->data[ulen[3]] == 0xFF && got[3]->data[ulen[3] + 1] == 0x11);
+
+    /* K=0 packet rejected on the slice path */
+    {
+        AVPacket *bad = av_packet_alloc();
+        av_new_packet(bad, 16 + 10);
+        memset(bad->data, 0, 16 + 10);
+        bad->data[0] = 0x80; bad->data[1] = 96;
+        bad->data[12] = 0x80; /* K=0 */
+        AVPacket *u = av_packet_alloc();
+        bool ready = false, fend = false;
+        assert(zstr_st2110_22_depayloader_process_unit(depay, bad, u,
+                                                       &ready, &fend) < 0);
+        assert(!ready);
+        av_packet_free(&bad);
+        av_packet_free(&u);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        av_packet_free(&units[i]);
+        av_packet_free(&got[i]);
+    }
+    for (int i = 0; i < nrtp; i++) av_packet_free(&rtp_all[i]);
+    zstr_st2110_22_payloader_free(&pay);
+    zstr_st2110_22_depayloader_free(&depay);
+
+    printf("[PASS] ST 2110-22 slice RTP passed.\n");
+}
+
+static void test_st2110_22_slice_encode(void)
+{
+    printf("[TEST] Testing ST 2110-22 SVT-JPEG-XS slice-mode encode...\n");
+
+    zstr_st2110_22_encoder_t *enc =
+        zstr_st2110_22_encoder_create(&(zstr_st2110_22_config_t){
+            .width = 640, .height = 480, .bpp_num = 3, .bpp_den = 1,
+            .slice_mode = 1, .slice_height = 16 });
+    if (!enc) {
+        printf("[SKIP] SVT-JPEG-XS not available, skipping slice encode.\n");
+        return;
+    }
+
+    AVFrame *in = av_frame_alloc();
+    in->width = 640;
+    in->height = 480;
+    in->format = AV_PIX_FMT_YUV422P;
+    assert(av_frame_get_buffer(in, 32) == 0);
+    assert(av_frame_make_writable(in) == 0);
+    for (int y = 0; y < 480; y++) {
+        memset(in->data[0] + y * in->linesize[0], (y * 255) / 480, 640);
+        memset(in->data[1] + y * in->linesize[1], 128, 320);
+        memset(in->data[2] + y * in->linesize[2], 128, 320);
+    }
+    in->pts = 0;
+
+    AVPacket **units = NULL;
+    int nb = 0;
+    /* 480/16 = 30 slices + 1 header unit */
+    assert(zstr_st2110_22_encode_units(enc, in, &units, &nb) == 0);
+    assert(nb == 31);
+    assert(units[0]->size < 1000); /* header segment is small */
+    assert(units[0]->data[0] == 0xFF && units[0]->data[1] == 0x10); /* SOC */
+    for (int i = 1; i < nb; i++) assert(units[i]->size > 1000); /* slices */
+
+    /* Units feed straight into the K=1 packetizer (integration) */
+    zstr_st2110_22_payloader_t *pay =
+        zstr_st2110_22_payloader_create(&(zstr_st2110_22_config_t){
+            .payload_type = 96, .ssrc = 1, .mtu = 1400 });
+    int total_rtp = 0;
+    for (int i = 0; i < nb; i++) {
+        AVPacket **arr = NULL;
+        int n = 0;
+        int sep = (i == 0) ? 0x7FF : (i - 1);
+        assert(zstr_st2110_22_payloader_process_unit(pay, units[i], sep,
+                                                     i == nb - 1,
+                                                     &arr, &n) == 0);
+        assert(n > 0);
+        /* First packet of each unit carries the right SEP/K */
+        assert((arr[0]->data[12] & 0x40) != 0);
+        int got_sep = (arr[0]->data[13] << 3) |
+                      ((arr[0]->data[14] >> 5) & 0x07);
+        assert(got_sep == sep);
+        total_rtp += n;
+        zstr_st2110_22_payloader_free_packets(arr, n);
+    }
+    printf("[INFO] Slice frame: %d units -> %d RTP packets.\n", nb, total_rtp);
+    /* F counter advanced exactly once for the frame */
+    {
+        AVPacket **arr = NULL;
+        int n = 0;
+        assert(zstr_st2110_22_payloader_process_unit(pay, units[0], 0x7FF,
+                                                     false, &arr, &n) == 0);
+        assert((arr[0]->data[12] & 0x1F) == 1); /* second frame: F=1 */
+        zstr_st2110_22_payloader_free_packets(arr, n);
+    }
+
+    zstr_st2110_22_encode_free_units(units, nb);
+    zstr_st2110_22_payloader_free(&pay);
+    av_frame_free(&in);
+    zstr_st2110_22_encoder_free(&enc);
+
+    printf("[PASS] ST 2110-22 slice encode passed.\n");
+}
+
 static void test_st2110_22_encode_decode(void)
 {
     printf("[TEST] Testing ST 2110-22 SVT-JPEG-XS encode/decode...\n");
@@ -1095,6 +1306,8 @@ int main(int argc, char **argv)
     test_st2022_5_row_fec();
     test_st2022_5_column_fec();
     test_st2110_22_rfc9134_roundtrip();
+    test_st2110_22_slice_rtp();
+    test_st2110_22_slice_encode();
     test_st2110_22_encode_decode();
     test_st2110_device_loopback();
 

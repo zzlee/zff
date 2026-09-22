@@ -127,7 +127,15 @@ int64_t zstr_st2110_21_packet_interval_ns(const zstr_st2110_21_pacer_t *s);
 void zstr_st2110_21_pacer_free(zstr_st2110_21_pacer_t **ps);
 
 /* ---------------------------------------------------------------------------
- * ST 2110-22: JPEG XS encode + RFC 9134 codestream packetization + decode
+ * ST 2110-22: JPEG XS encode + RFC 9134 packetization + decode
+ *
+ * Two packetization modes (RFC 9134 K bit):
+ * - Codestream (K=0): encode() -> payloader_process() -> depayloader_process().
+ * - Slice (K=1): encode_units() -> payloader_process_unit() per unit ->
+ *   depayloader_process_unit() per unit. SEP is the slice index (0x7FF for
+ *   the header unit), L ends each unit, M ends the frame.
+ * Slice decode to AVFrame is a follow-up (SVT's decoder cannot consume
+ * slice framing piecewise today); transport is complete and byte-exact.
  * --------------------------------------------------------------------------- */
 typedef struct zstr_st2110_22_encoder zstr_st2110_22_encoder_t;
 typedef struct zstr_st2110_22_payloader zstr_st2110_22_payloader_t;
@@ -144,13 +152,21 @@ typedef struct {
     uint8_t payload_type; /**< RTP PT (default 96) */
     uint32_t ssrc;      /**< RTP SSRC */
     int mtu;            /**< max RTP bytes incl. headers (default 1400) */
+    int slice_mode;     /**< RFC 9134 K bit: 0 = codestream, 1 = slice */
+    int slice_height;   /**< slice height in luma lines (default 16) */
 } zstr_st2110_22_config_t;
 
 zstr_st2110_22_encoder_t *zstr_st2110_22_encoder_create(
     const zstr_st2110_22_config_t *cfg);
-/* AVFrame YUV422P -> JPEG XS codestream AVPacket (90 kHz time base). */
+/* AVFrame YUV422P -> JPEG XS codestream AVPacket (90 kHz time base).
+ * Codestream mode only (EINVAL in slice mode: use encode_units). */
 int zstr_st2110_22_encode(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
                           AVPacket **out_pkt);
+/* Slice mode: one AVPacket per packetization unit (units[0] = header
+ * segment, units[1..] = slices in order). Requires slice_mode. */
+int zstr_st2110_22_encode_units(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
+                                AVPacket ***out_units, int *nb_units);
+void zstr_st2110_22_encode_free_units(AVPacket **units, int count);
 void zstr_st2110_22_encoder_free(zstr_st2110_22_encoder_t **ps);
 
 zstr_st2110_22_payloader_t *zstr_st2110_22_payloader_create(
@@ -159,6 +175,15 @@ int zstr_st2110_22_payloader_process(zstr_st2110_22_payloader_t *s,
                                      const AVPacket *in,
                                      AVPacket ***out_pkts,
                                      int *nb_out_pkts);
+/* Slice mode (K=1): packetize one unit. sep is 0x7FF for the header unit,
+ * else the 0-based slice index. is_last_unit sets M on the final packet.
+ * The RFC-required trailing EOC is appended to the last unit when the
+ * encoder omitted it (documented SVT gap). F counter advances per frame. */
+int zstr_st2110_22_payloader_process_unit(zstr_st2110_22_payloader_t *s,
+                                          const AVPacket *unit, int sep,
+                                          bool is_last_unit,
+                                          AVPacket ***out_pkts,
+                                          int *nb_out_pkts);
 void zstr_st2110_22_payloader_free_packets(AVPacket **pkts, int count);
 void zstr_st2110_22_payloader_free(zstr_st2110_22_payloader_t **ps);
 
@@ -168,6 +193,14 @@ int zstr_st2110_22_depayloader_process(zstr_st2110_22_depayloader_t *s,
                                        const AVPacket *rtp_pkt,
                                        AVPacket *out_pkt,
                                        bool *ready);
+/* Slice mode (K=1): reassemble one unit (ready=true on its L packet).
+ * frame_end is set when the completing packet also carries M.
+ * Rejects K=0 packets (use the codestream path for those). */
+int zstr_st2110_22_depayloader_process_unit(zstr_st2110_22_depayloader_t *s,
+                                            const AVPacket *rtp_pkt,
+                                            AVPacket *out_unit,
+                                            bool *ready,
+                                            bool *frame_end);
 void zstr_st2110_22_depayloader_free(zstr_st2110_22_depayloader_t **ps);
 
 zstr_st2110_22_decoder_t *zstr_st2110_22_decoder_create(

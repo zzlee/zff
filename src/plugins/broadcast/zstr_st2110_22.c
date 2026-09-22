@@ -48,6 +48,8 @@ struct zstr_st2110_22_encoder {
     int fps_den;
     int bpp_num;
     int bpp_den;
+    int slice_mode;
+    int slice_height;
 #ifdef ZSTR_HAVE_SVT_JPEGXS
     svt_jpeg_xs_encoder_api_t *enc;
 #endif
@@ -70,6 +72,8 @@ zstr_st2110_22_encoder_t *zstr_st2110_22_encoder_create(
     s->fps_den = (cfg && cfg->fps_den > 0) ? cfg->fps_den : 1;
     s->bpp_num = (cfg && cfg->bpp_num > 0) ? cfg->bpp_num : 3;
     s->bpp_den = (cfg && cfg->bpp_den > 0) ? cfg->bpp_den : 1;
+    s->slice_mode = (cfg && cfg->slice_mode) ? 1 : 0;
+    s->slice_height = (cfg && cfg->slice_height > 0) ? cfg->slice_height : 16;
 
     s->enc = calloc(1, sizeof(svt_jpeg_xs_encoder_api_t));
     if (!s->enc) {
@@ -89,6 +93,10 @@ zstr_st2110_22_encoder_t *zstr_st2110_22_encoder_create(
     s->enc->bpp_denominator = (uint32_t)s->bpp_den;
     s->enc->input_bit_depth = 8;
     s->enc->colour_format = COLOUR_FORMAT_PLANAR_YUV422;
+    if (s->slice_mode) {
+        s->enc->slice_packetization_mode = 1;
+        s->enc->slice_height = (uint32_t)s->slice_height;
+    }
     if (svt_jpeg_xs_encoder_init(SVT_JPEGXS_API_VER_MAJOR,
                                  SVT_JPEGXS_API_VER_MINOR, s->enc) != 0) {
         free(s->enc);
@@ -115,6 +123,7 @@ int zstr_st2110_22_encode(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
 #ifndef ZSTR_HAVE_SVT_JPEGXS
     return AVERROR(ENOSYS);
 #else
+    if (s->slice_mode) return AVERROR(EINVAL); /* use encode_units */
     if (frame->format != AV_PIX_FMT_YUV422P || frame->width != s->width ||
         frame->height != s->height || !frame->data[0] || !frame->data[1] ||
         !frame->data[2])
@@ -176,6 +185,114 @@ int zstr_st2110_22_encode(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
     *out_pkt = pkt;
     return 0;
 #endif
+}
+
+/* Fetch exactly one unit with the async-pipeline poll. 0 on unit, <0. */
+static int fetch_one_unit(zstr_st2110_22_encoder_t *s, AVPacket **out_pkt,
+                          int64_t pts, AVRational tb)
+{
+#ifdef ZSTR_HAVE_SVT_JPEGXS
+    svt_jpeg_xs_frame_t enc_out;
+    memset(&enc_out, 0, sizeof(enc_out));
+    enc_out.bitstream.buffer = s->bitstream_buf;
+    enc_out.bitstream.allocation_size = s->bitstream_cap;
+    enc_out.bitstream.used_size = 0;
+    SvtJxsErrorType_t err = SvtJxsErrorNone;
+    for (int i = 0; i < 200; i++) {
+        enc_out.bitstream.used_size = 0;
+        err = svt_jpeg_xs_encoder_get_packet(s->enc, &enc_out, 1);
+        if (err == SvtJxsErrorNone && enc_out.bitstream.used_size > 0) break;
+        if (err != SvtJxsErrorNone &&
+            err != (SvtJxsErrorType_t)0x80002033 /* NoErrorEmptyQueue */)
+            return AVERROR(EIO);
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        err = SvtJxsErrorNone;
+    }
+    if (err != SvtJxsErrorNone || enc_out.bitstream.used_size == 0)
+        return AVERROR(EAGAIN);
+
+    size_t used = enc_out.bitstream.used_size;
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt || av_new_packet(pkt, (int)used) < 0) {
+        av_packet_free(&pkt);
+        return AVERROR(ENOMEM);
+    }
+    memcpy(pkt->data, enc_out.bitstream.buffer, used);
+    pkt->pts = pts;
+    pkt->dts = pts;
+    pkt->time_base = tb;
+    *out_pkt = pkt;
+    return 0;
+#else
+    (void)s; (void)out_pkt; (void)pts; (void)tb;
+    return AVERROR(ENOSYS);
+#endif
+}
+
+int zstr_st2110_22_encode_units(zstr_st2110_22_encoder_t *s, const AVFrame *frame,
+                                AVPacket ***out_units, int *nb_units)
+{
+    if (!s || !frame || !out_units || !nb_units) return AVERROR(EINVAL);
+    *out_units = NULL;
+    *nb_units = 0;
+#ifndef ZSTR_HAVE_SVT_JPEGXS
+    return AVERROR(ENOSYS);
+#else
+    if (!s->slice_mode) return AVERROR(EINVAL); /* codestream: use encode() */
+    if (frame->format != AV_PIX_FMT_YUV422P || frame->width != s->width ||
+        frame->height != s->height || !frame->data[0] || !frame->data[1] ||
+        !frame->data[2])
+        return AVERROR(EINVAL);
+
+    int nslices = (s->height + s->slice_height - 1) / s->slice_height;
+    int nunits = 1 + nslices; /* header segment + one unit per slice */
+
+    svt_jpeg_xs_frame_t enc_in;
+    memset(&enc_in, 0, sizeof(enc_in));
+    enc_in.image.data_yuv[0] = frame->data[0];
+    enc_in.image.alloc_size[0] = (uint32_t)(frame->linesize[0] * frame->height);
+    enc_in.image.stride[0] = (uint32_t)frame->linesize[0];
+    enc_in.image.data_yuv[1] = frame->data[1];
+    enc_in.image.alloc_size[1] = (uint32_t)(frame->linesize[1] * frame->height);
+    enc_in.image.stride[1] = (uint32_t)frame->linesize[1];
+    enc_in.image.data_yuv[2] = frame->data[2];
+    enc_in.image.alloc_size[2] = (uint32_t)(frame->linesize[2] * frame->height);
+    enc_in.image.stride[2] = (uint32_t)frame->linesize[2];
+    enc_in.bitstream.buffer = s->bitstream_buf;
+    enc_in.bitstream.allocation_size = s->bitstream_cap;
+
+    if (svt_jpeg_xs_encoder_send_picture(s->enc, &enc_in, 1) != SvtJxsErrorNone)
+        return AVERROR(EIO);
+
+    /* Exact call count: over-calling get_packet blocks forever. */
+    AVPacket **units = calloc((size_t)nunits, sizeof(AVPacket *));
+    if (!units) return AVERROR(ENOMEM);
+    int got = 0;
+    for (int i = 0; i < nunits; i++) {
+        AVPacket *u = NULL;
+        if (fetch_one_unit(s, &u, frame->pts, (AVRational){ 1, ZSTR_XS_CLOCK }) < 0)
+            break;
+        units[got++] = u;
+    }
+    if (got != nunits) {
+        for (int i = 0; i < got; i++) av_packet_free(&units[i]);
+        free(units);
+        return AVERROR(EIO);
+    }
+    *out_units = units;
+    *nb_units = got;
+    return 0;
+#endif
+}
+
+void zstr_st2110_22_encode_free_units(AVPacket **units, int count)
+{
+    if (!units) return;
+    for (int i = 0; i < count; i++) {
+        if (units[i]) av_packet_free(&units[i]);
+    }
+    free(units);
 }
 
 void zstr_st2110_22_encoder_free(zstr_st2110_22_encoder_t **ps)
@@ -246,8 +363,8 @@ int zstr_st2110_22_payloader_process(zstr_st2110_22_payloader_t *s,
     if (!pkts) return AVERROR(ENOMEM);
 
     uint32_t ts = xs_rtp_ts(in);
+    /* F counter identifies the frame; it advances when the frame completes */
     uint8_t f = s->frame_counter;
-    s->frame_counter = (uint8_t)((s->frame_counter + 1) & 0x1F);
 
     int offset = 0;
     int remaining = in->size;
@@ -299,6 +416,7 @@ int zstr_st2110_22_payloader_process(zstr_st2110_22_payloader_t *s,
         remaining -= chunk;
     }
 
+    s->frame_counter = (uint8_t)((s->frame_counter + 1) & 0x1F);
     *out_pkts = pkts;
     *nb_out_pkts = idx;
     return 0;
@@ -311,6 +429,107 @@ void zstr_st2110_22_payloader_free_packets(AVPacket **pkts, int count)
         if (pkts[i]) av_packet_free(&pkts[i]);
     }
     free(pkts);
+}
+
+/* Slice mode (K=1): packetize one unit. L ends the unit, M ends the frame
+ * (only on the last unit's last packet). EOC (ff 11) is appended to the
+ * last unit when the encoder omitted it. */
+int zstr_st2110_22_payloader_process_unit(zstr_st2110_22_payloader_t *s,
+                                          const AVPacket *unit, int sep,
+                                          bool is_last_unit,
+                                          AVPacket ***out_pkts,
+                                          int *nb_out_pkts)
+{
+    if (!s || !unit || !out_pkts || !nb_out_pkts) return AVERROR(EINVAL);
+    *out_pkts = NULL;
+    *nb_out_pkts = 0;
+    if (!unit->data || unit->size <= 0) return 0;
+    if (sep < 0 || sep > 0x7FF) return AVERROR(EINVAL);
+
+    int max_payload = s->mtu - 12 - 4;
+    if (max_payload <= 0) return AVERROR(EINVAL);
+
+    /* Trailing EOC for the last unit (SVT omits it; RFC 9134 requires it) */
+    const uint8_t *data = unit->data;
+    int size = unit->size;
+    uint8_t eoc_tail[2] = { 0xFF, 0x11 };
+    uint8_t *extended = NULL;
+    if (is_last_unit &&
+        (size < 2 || data[size - 2] != 0xFF || data[size - 1] != 0x11)) {
+        extended = malloc((size_t)size + 2);
+        if (!extended) return AVERROR(ENOMEM);
+        memcpy(extended, data, size);
+        memcpy(extended + size, eoc_tail, 2);
+        data = extended;
+        size += 2;
+    }
+
+    int total = (size + max_payload - 1) / max_payload;
+    AVPacket **pkts = calloc(total, sizeof(AVPacket *));
+    if (!pkts) {
+        free(extended);
+        return AVERROR(ENOMEM);
+    }
+
+    uint32_t ts = xs_rtp_ts(unit);
+    uint8_t f = s->frame_counter;
+
+    int offset = 0;
+    int remaining = size;
+    int pcur = 0;
+    int idx = 0;
+    int ret = 0;
+    while (remaining > 0) {
+        int chunk = remaining > max_payload ? max_payload : remaining;
+        bool last_of_unit = (remaining == chunk);
+        bool m = is_last_unit && last_of_unit;
+
+        AVPacket *pkt = av_packet_alloc();
+        if (!pkt || av_new_packet(pkt, 12 + 4 + chunk) < 0) {
+            av_packet_free(&pkt);
+            ret = AVERROR(ENOMEM);
+            break;
+        }
+        uint8_t *d = pkt->data;
+        d[0] = 0x80;
+        d[1] = (uint8_t)((m ? 0x80 : 0x00) | (s->payload_type & 0x7F));
+        d[2] = (uint8_t)(s->seq >> 8);
+        d[3] = (uint8_t)(s->seq & 0xFF);
+        s->seq++;
+        d[4] = (uint8_t)(ts >> 24);
+        d[5] = (uint8_t)((ts >> 16) & 0xFF);
+        d[6] = (uint8_t)((ts >> 8) & 0xFF);
+        d[7] = (uint8_t)(ts & 0xFF);
+        d[8] = (uint8_t)(s->ssrc >> 24);
+        d[9] = (uint8_t)((s->ssrc >> 16) & 0xFF);
+        d[10] = (uint8_t)((s->ssrc >> 8) & 0xFF);
+        d[11] = (uint8_t)(s->ssrc & 0xFF);
+        /* RFC 9134 payload header: T=1 K=1 L=unit-end I=00 F SEP P */
+        d[12] = (uint8_t)(0x80 | 0x40 | (last_of_unit ? 0x20 : 0x00) | (f & 0x1F));
+        d[13] = (uint8_t)((sep >> 3) & 0xFF);
+        d[14] = (uint8_t)(((sep & 0x07) << 5) | ((pcur >> 8) & 0x1F));
+        d[15] = (uint8_t)(pcur & 0xFF);
+        memcpy(d + 16, data + offset, chunk);
+
+        pkt->pts = unit->pts;
+        pkt->dts = unit->dts;
+        pkt->time_base = unit->time_base;
+        pkts[idx++] = pkt;
+        offset += chunk;
+        remaining -= chunk;
+        pcur = (pcur + 1) % 2048;
+    }
+    free(extended);
+
+    if (ret < 0) {
+        zstr_st2110_22_payloader_free_packets(pkts, idx);
+        return ret;
+    }
+    if (is_last_unit)
+        s->frame_counter = (uint8_t)((s->frame_counter + 1) & 0x1F);
+    *out_pkts = pkts;
+    *nb_out_pkts = idx;
+    return 0;
 }
 
 void zstr_st2110_22_payloader_free(zstr_st2110_22_payloader_t **ps)
@@ -331,6 +550,9 @@ struct zstr_st2110_22_depayloader {
     uint8_t cur_f;
     int expect_p; /* next P counter expected, -1 = any (first packet) */
     int have_frame;
+    /* Slice-mode (K=1) unit reassembly state */
+    int have_unit;
+    int unit_sep;
 };
 
 zstr_st2110_22_depayloader_t *zstr_st2110_22_depayloader_create(
@@ -434,6 +656,96 @@ void zstr_st2110_22_depayloader_free(zstr_st2110_22_depayloader_t **ps)
     free((*ps)->accum);
     free(*ps);
     *ps = NULL;
+}
+
+/* Slice mode (K=1): reassemble one packetization unit per RFC 9134 §4.1.
+ * - First unit of a frame is the header segment (SEP 0x7FF), then slices
+ *   with SEP = slice index; P counts packets within the unit.
+ * - L ends the unit (ready=true); M additionally ends the frame.
+ * - A new timestamp drops the partial unit (previous frame lost).
+ * - A P gap or SEP jump mid-unit drops it; a P==0 packet always starts
+ *   a fresh unit. Wire bytes (incl. EOC) are preserved verbatim. */
+int zstr_st2110_22_depayloader_process_unit(zstr_st2110_22_depayloader_t *s,
+                                            const AVPacket *rtp_pkt,
+                                            AVPacket *out_unit,
+                                            bool *ready,
+                                            bool *frame_end)
+{
+    if (!s || !rtp_pkt || !out_unit || !ready || !frame_end)
+        return AVERROR(EINVAL);
+    *ready = false;
+    *frame_end = false;
+    if (rtp_pkt->size < 16) return AVERROR_INVALIDDATA;
+
+    const uint8_t *d = rtp_pkt->data;
+    if ((d[0] >> 6) != 2) return AVERROR_INVALIDDATA;
+    uint8_t pt = d[1] & 0x7F;
+    if (s->payload_type && pt != s->payload_type) return AVERROR_INVALIDDATA;
+    bool marker = (d[1] & 0x80) != 0;
+    uint32_t ts = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) |
+                  ((uint32_t)d[6] << 8) | d[7];
+
+    bool k = (d[12] >> 6) & 0x01;
+    bool l = (d[12] >> 5) & 0x01;
+    uint8_t f = d[12] & 0x1F;
+    int sep = (d[13] << 3) | ((d[14] >> 5) & 0x07);
+    int p = ((d[14] & 0x1F) << 8) | d[15];
+    if (k != 1) return AVERROR_INVALIDDATA; /* slice path takes K=1 only */
+    if (marker && !l) {
+        /* M ends the frame, hence also its last unit: L must be set */
+        s->accum_size = 0;
+        s->have_unit = 0;
+        s->expect_p = -1;
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (s->have_unit && ts != s->cur_ts) {
+        /* New frame before unit end: previous frame was lost, resync */
+        s->accum_size = 0;
+        s->have_unit = 0;
+        s->expect_p = -1;
+    }
+    if (!s->have_unit) {
+        if (p != 0) return AVERROR_INVALIDDATA; /* can only join at P==0 */
+        s->cur_ts = ts;
+        s->cur_f = f;
+        s->unit_sep = sep;
+        s->have_unit = 1;
+        s->expect_p = 0;
+    } else if (sep != s->unit_sep || p != s->expect_p) {
+        /* Gap, reorder, or SEP jump mid-unit: drop it */
+        s->accum_size = 0;
+        s->have_unit = 0;
+        if (p != 0 || ts != s->cur_ts) {
+            s->expect_p = -1;
+            return AVERROR_INVALIDDATA;
+        }
+        /* Same-frame P==0 restarts a fresh unit (loss contained) */
+        s->cur_f = f;
+        s->unit_sep = sep;
+        s->have_unit = 1;
+        s->expect_p = 0;
+    }
+
+    int payload_len = rtp_pkt->size - 16;
+    if (s->accum_size + payload_len > s->accum_cap) return AVERROR(ENOMEM);
+    memcpy(s->accum + s->accum_size, d + 16, payload_len);
+    s->accum_size += payload_len;
+    s->expect_p = (p + 1) % 2048;
+
+    if (!l) return 0;
+
+    if (av_new_packet(out_unit, s->accum_size) < 0) return AVERROR(ENOMEM);
+    memcpy(out_unit->data, s->accum, s->accum_size);
+    out_unit->pts = rtp_pkt->pts;
+    out_unit->dts = rtp_pkt->dts;
+    out_unit->time_base = rtp_pkt->time_base;
+    s->accum_size = 0;
+    s->have_unit = 0;
+    s->expect_p = -1;
+    *ready = true;
+    *frame_end = marker;
+    return 0;
 }
 
 /* --- Decoder --- */

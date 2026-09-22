@@ -64,8 +64,13 @@ if need_ffmpeg_build; then
     export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
     export LD_LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
     cd /tmp/zffdeps
+    # Pin nv-codec-headers to NVENC API 13.0 (SDK 13.0): master tracks the
+    # newest API (13.1+), which Kaggle's T4 driver (API 13.0) rejects.
+    # Override with NV_CODEC_TAG env for newer drivers.
+    NV_CODEC_TAG="${NV_CODEC_TAG:-n13.0.19.1}"
     if [ ! -d nv-codec-headers ]; then
-        git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+        git clone --depth 1 --branch "${NV_CODEC_TAG}" \
+            https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
     fi
     make -C nv-codec-headers PREFIX="${FFMPEG_PREFIX}" install
     if [ ! -d ffmpeg-6.1.2 ]; then

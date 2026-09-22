@@ -90,7 +90,7 @@ Streaming (`src/plugins/streaming/`, `AVPacket` in/out):
 | `zstr_rtspserver` | `rtsp_server.c` | multi-client, TCP interleaved + UDP, SDP, RTCP SR |
 | `zstr_srt_source/sink/parser` | `srt_*.c` | SRT transport + SubRip parser |
 | `zstr_hls_sink` | `hls_sink.c` | drives native hls muxer; Annex-B→AVCC per packet |
-| `zstr_webrtc*` | `webrtc_endpoint.c` + TWCC | engine + mux/demux + SDP compat + WS signaling + WHIP + webpage demo |
+| `zstr_webrtc*` | `webrtc_endpoint.c` + TWCC | engine + mux/demux + SDP compat + WS signaling + WHIP publish + WHEP play + webpage demo |
 
 Broadcast (`src/plugins/broadcast/`):
 | Plugin | From | Notes |
@@ -131,6 +131,8 @@ zstr_webrtc_t *a = zstr_webrtc_alloc("twcc=1"), *b = zstr_webrtc_alloc(NULL);
 zstr_webrtc_add_video_track(a, ZSTR_WEBRTC_CODEC_H264, 126, 90000);
 // file:  offer file <-> answer file; WS: zstr_webrtc_connect_signaling();
 // WHIP:  zstr_webrtc_whip_publish(a, "http://host:8080/whip", NULL, 15000);
+// WHEP:  zstr_webrtc_add_recv_video_track(b, H264, 96, 90000);
+//        zstr_webrtc_whep_play(b, "http://host:8080/whep", NULL, 15000);
 zstr_webrtc_send_media(a, 0, pkt);
 zstr_webrtc_recv_media(b, out, &track, 200, &got);
 ```

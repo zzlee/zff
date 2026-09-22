@@ -74,6 +74,20 @@ int zstr_webrtc_add_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
                                 uint8_t payload_type, uint32_t clock_rate);
 int zstr_webrtc_add_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
                                 uint8_t payload_type, uint32_t clock_rate);
+/* Recvonly variants for WHEP-style playback: no local sender, the offer
+ * carries recvonly m-lines and remote tracks arrive via on_track. */
+int zstr_webrtc_add_recv_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                     uint8_t payload_type, uint32_t clock_rate);
+int zstr_webrtc_add_recv_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                     uint8_t payload_type, uint32_t clock_rate);
+/* Answer-side send tracks for server roles (e.g. WHEP stub): reuse the
+ * offered section MID so the transceiver binds to the offered m-line.
+ * Call after set_remote_description(offer), before create_answer. Only
+ * valid when the offerer sends nothing there (recvonly offer). */
+int zstr_webrtc_add_answer_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                       uint8_t payload_type, uint32_t clock_rate);
+int zstr_webrtc_add_answer_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                       uint8_t payload_type, uint32_t clock_rate);
 
 /* Signaling (returned SDP strings are owned by the engine).
  * Fully manual negotiation (disableAutoNegotiation): create_offer() and
@@ -137,6 +151,15 @@ int zstr_webrtc_connect_signaling(zstr_webrtc_t *s, const char *url,
  * Returns 0 once connected, negative AVERROR on failure. */
 int zstr_webrtc_whip_publish(zstr_webrtc_t *s, const char *whip_url,
                              char **resource_url_out, int timeout_ms);
+
+/* One-call WHEP playout: recvonly offer -> HTTP POST -> answer ->
+ * connected, then zstr_webrtc_recv_media() delivers the remote tracks.
+ * Caller adds recv tracks first (zstr_webrtc_add_recv_*_track).
+ * resource_url_out receives the session URL for PATCH/DELETE
+ * (caller frees with free(), may be NULL).
+ * Returns 0 once connected, negative AVERROR on failure. */
+int zstr_webrtc_whep_play(zstr_webrtc_t *s, const char *whep_url,
+                          char **resource_url_out, int timeout_ms);
 
 /* Codec selected from the last remote offer (empty until set_remote). */
 int zstr_webrtc_selected_codecs(const zstr_webrtc_t *s,

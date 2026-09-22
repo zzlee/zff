@@ -64,6 +64,9 @@ struct zstr_webrtc {
     char *codec_pref; /* comma-separated codec preference, NULL = defaults */
     char selected_video[32];
     char selected_audio[32];
+    /* Offered section MIDs from the last remote offer (for answer tracks) */
+    char offered_video_mid[32];
+    char offered_audio_mid[32];
 
     /* libdatachannel state */
     int pc_id;
@@ -619,7 +622,8 @@ void zstr_webrtc_set_dc_message_cb(zstr_webrtc_t *s, zstr_webrtc_dc_message_cb c
 
 /* --- Tracks --- */
 static int add_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
-                     uint8_t pt, uint32_t clock, bool audio)
+                     uint8_t pt, uint32_t clock, bool audio, bool recvonly,
+                     const char *force_mid)
 {
     if (!s || !s->pc_created || s->nb_tracks >= ZSTR_WEBRTC_MAX_TRACKS) return -1;
     webrtc_track_t *t = &s->tracks[s->nb_tracks];
@@ -628,12 +632,19 @@ static int add_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
     t->payload_type = pt;
     t->is_audio = audio;
     /* MID must be unique per engine: the answerer associates remote tracks
-     * by MID, and a collision with its own local tracks suppresses on_track. */
-    snprintf(t->mid, sizeof(t->mid), "%s%d-%d",
-             audio ? "audio" : "video", s->nb_tracks, s->pc_id);
+     * by MID, and a collision with its own local tracks suppresses on_track.
+     * Exception: answer tracks deliberately reuse the OFFERED mid so the
+     * local send transceiver binds to the offered m-line (standard answer
+     * semantics); only valid when the remote side sends nothing on that
+     * MID (i.e. it offered recvonly/inactive). */
+    if (force_mid && force_mid[0])
+        snprintf(t->mid, sizeof(t->mid), "%s", force_mid);
+    else
+        snprintf(t->mid, sizeof(t->mid), "%s%d-%d",
+                 audio ? "audio" : "video", s->nb_tracks, s->pc_id);
 
     rtcTrackInit tinit = { 0 };
-    tinit.direction = RTC_DIRECTION_SENDONLY;
+    tinit.direction = recvonly ? RTC_DIRECTION_RECVONLY : RTC_DIRECTION_SENDONLY;
     tinit.codec = codec_to_rtc(codec);
     tinit.payloadType = (int)pt;
     tinit.ssrc = (uint32_t)rand() ^ (uint32_t)(uintptr_t)s;
@@ -648,6 +659,43 @@ static int add_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
     if (tr < 0) return -1;
     t->track_id = tr;
     t->ssrc = tinit.ssrc;
+
+    if (recvonly) {
+        /* Receiver-side RTCP only: NACK responder + REMB for congestion
+         * feedback. No packetizer, no sender reports, no outgoing TWCC. */
+        rtcChainRtcpNackResponder(tr, RTC_DEFAULT_MAXIMUM_PACKET_COUNT_FOR_NACK_CACHE);
+        rtcChainRembHandler(tr, on_remb_shim);
+        /* Local recvonly transceivers are first-class receivers: attach
+         * the depacketizer + frame callback and register in the recv
+         * table. Inbound RTP is routed to the local transceiver object
+         * (not the on_track handle) when their MIDs coincide; without
+         * this, WHEP-style players connect but never receive.
+         * Single delivery is guaranteed: exactly one of the two paths
+         * carries frames per topology (verified by test drain). */
+        switch (codec) {
+            case ZSTR_WEBRTC_CODEC_H264:
+                rtcSetH264Depacketizer(tr, RTC_NAL_SEPARATOR_START_SEQUENCE);
+                break;
+            case ZSTR_WEBRTC_CODEC_H265:
+                rtcSetH265Depacketizer(tr, RTC_NAL_SEPARATOR_START_SEQUENCE);
+                break;
+            case ZSTR_WEBRTC_CODEC_VP8:  rtcSetVP8Depacketizer(tr); break;
+            case ZSTR_WEBRTC_CODEC_VP9:  rtcSetVP9Depacketizer(tr); break;
+            case ZSTR_WEBRTC_CODEC_OPUS: rtcSetOpusDepacketizer(tr); break;
+            default: break;
+        }
+        rtcSetUserPointer(tr, s);
+        rtcSetFrameCallback(tr, on_frame);
+        pthread_mutex_lock(&s->sig_lock);
+        if (s->nb_recv < ZSTR_WEBRTC_MAX_TRACKS) {
+            s->recv[s->nb_recv].track_id = tr;
+            s->recv[s->nb_recv].clock_rate = t->clock_rate;
+            s->recv[s->nb_recv].active = true;
+            s->nb_recv++;
+        }
+        pthread_mutex_unlock(&s->sig_lock);
+        return s->nb_tracks++;
+    }
 
     /* Attach the codec packetizer (required: sending without one throws).
      * Mirrors zstreamer: H264/H265 expect Annex-B start codes. */
@@ -695,13 +743,43 @@ static int add_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
 int zstr_webrtc_add_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
                                 uint8_t pt, uint32_t clock)
 {
-    return add_track(s, codec, pt, clock, false);
+    return add_track(s, codec, pt, clock, false, false, NULL);
 }
 
 int zstr_webrtc_add_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
                                 uint8_t pt, uint32_t clock)
 {
-    return add_track(s, codec, pt, clock, true);
+    return add_track(s, codec, pt, clock, true, false, NULL);
+}
+
+/* Recvonly transceivers for WHEP-style playback (no local sender). */
+int zstr_webrtc_add_recv_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                     uint8_t pt, uint32_t clock)
+{
+    return add_track(s, codec, pt, clock, false, true, NULL);
+}
+
+int zstr_webrtc_add_recv_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                     uint8_t pt, uint32_t clock)
+{
+    return add_track(s, codec, pt, clock, true, true, NULL);
+}
+
+/* Answer-side send tracks: bind to the offered m-line by reusing its MID.
+ * Call after set_remote_description(offer), before create_answer. Only
+ * valid when the offerer sends nothing on that section (recvonly). */
+int zstr_webrtc_add_answer_video_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                       uint8_t pt, uint32_t clock)
+{
+    if (!s || !s->offered_video_mid[0]) return -1;
+    return add_track(s, codec, pt, clock, false, false, s->offered_video_mid);
+}
+
+int zstr_webrtc_add_answer_audio_track(zstr_webrtc_t *s, zstr_webrtc_codec_t codec,
+                                       uint8_t pt, uint32_t clock)
+{
+    if (!s || !s->offered_audio_mid[0]) return -1;
+    return add_track(s, codec, pt, clock, true, false, s->offered_audio_mid);
 }
 
 /* --- Signaling --- */
@@ -802,6 +880,43 @@ const char *zstr_webrtc_create_answer(zstr_webrtc_t *s)
     return sdp;
 }
 
+/* Extract first video/first audio section MIDs from a remote offer.
+ * Used by answer tracks: reusing the offered MID binds the local send
+ * transceiver to the offered m-line (standard WebRTC answer semantics).
+ * Safe only when the remote side sends nothing on that MID (recvonly). */
+static void extract_offered_mids(zstr_webrtc_t *s, const char *sdp)
+{
+    s->offered_video_mid[0] = '\0';
+    s->offered_audio_mid[0] = '\0';
+    if (!sdp) return;
+    int cur_media = 0; /* 1 = video, 2 = audio */
+    const char *p = sdp;
+    const char *end = sdp + strlen(sdp);
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) eol = end;
+        size_t len = (size_t)(eol - p);
+        while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == '\n')) len--;
+        if (len >= 7 && strncmp(p, "m=video", 7) == 0) cur_media = 1;
+        else if (len >= 7 && strncmp(p, "m=audio", 7) == 0) cur_media = 2;
+        else if (len > 6 && strncmp(p, "a=mid:", 6) == 0 && cur_media) {
+            size_t mlen = len - 6;
+            if (cur_media == 1 && !s->offered_video_mid[0]) {
+                if (mlen >= sizeof(s->offered_video_mid))
+                    mlen = sizeof(s->offered_video_mid) - 1;
+                memcpy(s->offered_video_mid, p + 6, mlen);
+                s->offered_video_mid[mlen] = '\0';
+            } else if (cur_media == 2 && !s->offered_audio_mid[0]) {
+                if (mlen >= sizeof(s->offered_audio_mid))
+                    mlen = sizeof(s->offered_audio_mid) - 1;
+                memcpy(s->offered_audio_mid, p + 6, mlen);
+                s->offered_audio_mid[mlen] = '\0';
+            }
+        }
+        p = (eol < end) ? eol + 1 : end;
+    }
+}
+
 int zstr_webrtc_set_remote_description(zstr_webrtc_t *s, const char *sdp, const char *type)
 {
     if (!s || !s->pc_created || !sdp || !type) return -1;
@@ -814,6 +929,7 @@ int zstr_webrtc_set_remote_description(zstr_webrtc_t *s, const char *sdp, const 
     const char *stage = filtered ? filtered : sdp;
     char *selected = NULL;
     if (strcmp(type, "offer") == 0) {
+        extract_offered_mids(s, sdp); /* raw offer: mid lines unfiltered */
         selected = zstr_sdp_select_codecs(stage, s->codec_pref,
                                           s->selected_video, sizeof(s->selected_video),
                                           s->selected_audio, sizeof(s->selected_audio));

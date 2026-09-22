@@ -1,0 +1,154 @@
+# zff: AI Coding Agent Guide
+
+`zff` (Z-FFmpeg) is a modular multimedia extension ecosystem built directly on
+the industry-standard **FFmpeg** C architecture — no custom pipeline engine.
+Transplanted and evolved from `zstreamer` (whose GStreamer-like `zst_*` engine
+is frozen; only its algorithms are ported).
+
+## Architecture (two tiers)
+
+```
+Application (100% standard FFmpeg API: AVFormatContext, AVFilterGraph, AVFrame)
+  ├── libzff-core.so — proprietary HW bridge (NvBufSurface/DMABUF, PTP time, SideData)
+  └── zstr_* plugins — native FFmpeg components (libavfilter/avformat/avdevice)
+```
+
+## Buffer rules (non-negotiable)
+
+1. **No custom buffer types.** Raw media = `AVFrame`, compressed/RTP = `AVPacket`, both governed by `AVBufferRef` refcounts.
+2. **Video frames**: allocate with `ff_get_video_buffer()` inside filters, `av_frame_alloc()` + `av_frame_get_buffer()` in devices.
+3. **Audio frames**: `ff_get_audio_buffer()` / same pattern.
+4. **Muxers/demuxers**: `av_packet_alloc()` / `av_packet_free()`.
+5. **Private metadata**: FourCC side-data tags (`ZSTR_TAG_*`), never TLV containers. `av_frame_get_side_data()` / `av_packet_get_side_data()` are O(1).
+6. **PTS convention**: nanoseconds in `zstr_aresample`; stream time_base elsewhere. Never invent timestamp types.
+
+## Build & test (Docker only)
+
+```bash
+./scripts/build-docker.sh x86   # docker/Dockerfile.x86 -> zff-build:x86
+./scripts/build.sh x86          # outputs to build-x86/
+docker run --rm -v $PWD:/workspace -w /workspace/build-x86 zff-build:x86 ctest --output-on-failure
+./scripts/dev.sh x86            # interactive shell
+```
+
+CMake options: `BUILD_TESTS=ON`, `BUILD_SHARED_LIBS=ON`, `ENABLE_JETSON=OFF`,
+`ENABLE_DANTE=ON`, `HAS_WEBRTC`/`HAS_SVT_JPEGXS` auto-detected.
+Libraries: `libzff-core` (`src/core/`), `libzff-plugins` (`src/plugins/`).
+Tests: one `tests/test_<name>.c` per plugin, registered with `add_test`.
+
+## Coding conventions
+
+- **C11**, `zstr_*` prefix for plugins, `zff_*` for core. Snake_case.
+- **Tests must not put side effects in `assert()`**: Release defines `NDEBUG`,
+  so `assert(connect(...))` compiles the call away. Use a `CHECK` macro that
+  always evaluates (see `tests/test_rtsp_server.c`).
+- FFmpeg device pattern: C engine (`alloc/process/free`) + `FFOutputFormat` /
+  `AVInputFormat` wrapper + `AVOption` table + registration in
+  `src/plugins/zff_plugins.c`. Follow `zstr_net_sink.c` as the template.
+- Errors: negative `AVERROR(...)`; success 0. No custom result codes.
+- Hardware missing → constructor returns NULL + mock fallback (see
+  `zstr_v4l2.c` `is_mock`), never `#error`.
+- Optional dependencies degrade via `HAS_*` CMake flags, never hard-fail
+  except the core FFmpeg/ALSA/GL/X11 set.
+
+## Plugin inventory
+
+Devices (`libavdevice`-style indev/outdev, `src/plugins/devices/`):
+| Plugin | I/O | From | Notes |
+|---|---|---|---|
+| `zstr_videotestsrc` | indev | `video_test_src.c` | bars/gradient/checker/noise/black; `pixel_format` yuv420p/i420/yv12→420P,nv12,nv16,yuyv422,rgb24,bgr24,rgba,bgra |
+| `zstr_audiotestsrc` | indev | `audio_test_src.c` | sine/noise waveforms |
+| `zstr_v4l2` | indev | `v4l2_source.c` | VIDIOC_EXPBUF DMABUF export + mock; fmts yuyv/nv12/nv16/420p/rgb24/bgr24/rgb32/bgr32 |
+| `zstr_v4l2_sink` | outdev | `v4l2_sink.c` | same fmts; unsupported stream fmt fails fast |
+| `zstr_alsa` / `zstr_alsa_sink` | indev/outdev | `alsa_source.c` | non-blocking poll, xrun recovery, mock sine |
+
+Audio (`src/plugins/audio/`, `AVFrame` in/out):
+| Plugin | From | Key algorithm kept |
+|---|---|---|
+| `zstr_aresample` | `audio_resampler.c` | PTS ASRC drift (`swr_set_compensation`), +1Hz nudge, fractional `rate_numer/denom`, `flush()` |
+| `zstr_amix` | `audio_mixer.c` | volume/mute/pan per input, soft-clip, `dropout_transition` ramp |
+
+Video (`src/plugins/video/`, `AVFrame` in/out):
+| Plugin | From | Key algorithm kept |
+|---|---|---|
+| `zstr_scale` | `video_scaler.c` | thin sws wrapper; preserves `color_range`; `align` for HW stride |
+| `zstr_text_overlay` | `text_overlay.c` | FreeType OSD, timecode, PTS-window subtitles; fmts 420P/NV12/NV16/YUYV/RGB/BGR/RGBA/BGRA |
+| `zstr_glsink` | `gl_sink.c` | GLX zero-copy display; native YUV420P/NV12/RGB24 shaders, sws fallback rest |
+| `zstr_gl_comp` | `gl_comp_sink.c` | GPU multi-layer compositor (alpha/borders/layouts), sws input conversion |
+
+Streaming (`src/plugins/streaming/`, `AVPacket` in/out):
+| Plugin | From | Notes |
+|---|---|---|
+| `zstr_net_source/sink` | `net_source/sink.c` | UDP/TCP raw; thin socket wrapper |
+| `zstr_rtp_payloader/depayloader` | `rtp_*.c` | H264 FU-A / H265 FU / RFC 3640 AAC; multi-NAL AU split; marker on last |
+| `zstr_rtspserver` | `rtsp_server.c` | multi-client, TCP interleaved + UDP, SDP, RTCP SR |
+| `zstr_srt_source/sink/parser` | `srt_*.c` | SRT transport + SubRip parser |
+| `zstr_hls_sink` | `hls_sink.c` | drives native hls muxer; Annex-B→AVCC per packet |
+| `zstr_webrtc*` | `webrtc_endpoint.c` + TWCC | engine + mux/demux + SDP compat + WS signaling + WHIP + webpage demo |
+
+Broadcast (`src/plugins/broadcast/`):
+| Plugin | From | Notes |
+|---|---|---|
+| `zstr_st2110_20/30` | `st2110_20/30_*` | RFC 4175 video, AES67 PCM audio |
+| `zstr_st2110_40` | `st2110_40_*` | ANC packets (ST 344 8-bit mapping), PT 100 |
+| `zstr_st2110_21` | (new; zstreamer's file is a misnamed H264 payloader) | Narrow sender pacer |
+| `zstr_st2110_22` | `st2110_22_*` + RFC 9134 | SVT-JPEG-XS encode/decode (optional dep), codestream RTP |
+| `zstr_st2022_7` | `st2110_redundancy_*` | hitless merge dedup |
+| `zstr_st2022_5` | (zstreamer's fec is an unimplemented stub) | real row-XOR FEC encode/recovery |
+
+## Recipes
+
+Capture + resample + mix (all standard FFmpeg objects):
+```c
+zff_plugins_register_all();
+AVFormatContext *cap = NULL;
+avformat_open_input(&cap, "hw:0,0", zff_find_input_format("zstr_alsa"), NULL);
+zstr_aresample_t *rs = zstr_aresample_alloc("out_sample_rate=48000:asrc_mode=pts");
+zstr_amix_t *mix = zstr_amix_alloc("inputs=2:normalize=1:dropout_transition=0.5");
+```
+
+Publish H264 over RTSP:
+```c
+AVFormatContext *oc = NULL;
+avformat_alloc_output_context2(&oc, zff_find_output_format("zstr_rtspserver"),
+                               NULL, "rtsp://0.0.0.0:8554/live");
+// add H264 video (+AAC audio) streams with codecpar ...
+avformat_write_header(oc, NULL);   // binds, spawns listener
+av_write_frame(oc, pkt);           // fans out to PLAYing clients
+av_write_trailer(oc);
+```
+
+WebRTC call (engine + file/WS/WHIP signaling pick one):
+```c
+zstr_webrtc_t *a = zstr_webrtc_alloc("twcc=1"), *b = zstr_webrtc_alloc(NULL);
+zstr_webrtc_add_video_track(a, ZSTR_WEBRTC_CODEC_H264, 126, 90000);
+// file:  offer file <-> answer file; WS: zstr_webrtc_connect_signaling();
+// WHIP:  zstr_webrtc_whip_publish(a, "http://host:8080/whip", NULL, 15000);
+zstr_webrtc_send_media(a, 0, pkt);
+zstr_webrtc_recv_media(b, out, &track, 200, &got);
+```
+
+ST 2110-20 send with Narrow pacing:
+```c
+zstr_st2110_20_payloader_process(pay20, frame, &pkts, &n);
+zstr_st2110_21_frame_start(pacer, ts, n);
+for (i...) { zstr_st2110_21_wait_packet(pacer); sendto(...); }
+```
+
+## What NOT to port
+
+FFmpeg already has these — use native, do not rewrap: all standard codecs
+(x264/x265/aac/opus/vp8/vp9), mp4/mpegts/flv muxers, scale/aresample/amix
+basics, testsrc/sine sources, drawtext, v4l2/alsa/xv/sdl2 devices,
+nvenc/vaapi/qsv, srt/tcp/udp/http protocols, hls muxer, sdp demuxer.
+Port only: server-side halves (RTSP server), broadcast protocols
+(ST 2110/Dante), congestion control (TWCC/GCC), drift compensation,
+hardware bridges. See `PORTING_ANALYSIS.md` in the workspace (not the repo).
+
+## Docs map
+
+- `README.md` — product pitch + quick examples
+- `ARCHITECTURE.md` — buffer model, zero-copy, SideData, dataflow
+- `ELEMENTS.md` — full element→plugin mapping
+- `ROADMAP.md` — phased migration plan
+- `examples/webrtc_page/` — browser publishing demo (C + HTML/JS)

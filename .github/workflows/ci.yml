@@ -1,0 +1,49 @@
+name: zff CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Docker build + CTest
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CI Image (deps + compile)
+        run: |
+          docker build -f docker/Dockerfile.x86 --target ci -t zff-ci:${{ github.sha }} .
+
+      - name: Run Unit Tests (CTest)
+        run: |
+          docker run --rm zff-ci:${{ github.sha }}
+
+  llms-freshness:
+    name: llms-full.txt freshness
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Regenerate and diff
+        run: |
+          ./scripts/generate-llms.sh
+          git diff --exit-code --stat -- llms-full.txt || \
+            (echo "::error::llms-full.txt is stale; run ./scripts/generate-llms.sh and commit." && exit 1)

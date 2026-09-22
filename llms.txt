@@ -40,6 +40,10 @@ CMake options: `BUILD_TESTS=ON`, `BUILD_SHARED_LIBS=ON`, `ENABLE_JETSON=OFF`,
 `ENABLE_DANTE=ON`, `HAS_WEBRTC`/`HAS_SVT_JPEGXS` auto-detected.
 Libraries: `libzff-core` (`src/core/`), `libzff-plugins` (`src/plugins/`).
 Tests: one `tests/test_<name>.c` per plugin, registered with `add_test`.
+HW integration tests (`test_hwaccel_vaapi/cuda`) use native libav* hwcontext
+API only (no toolkit headers at build); they SKIP without a GPU. Local GPU:
+`docker run --device=/dev/dri:/dev/dri --group-add 44 --group-add 990 ...`.
+Kaggle T4 (CUDA): `!bash scripts/kaggle-cuda-test.sh` in a GPU notebook.
 
 ## Install & consume
 

@@ -39,6 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-dev \
     libxext-dev \
     xvfb \
+    libva-dev \
+    libva-drm2 \
+    libva-x11-2 \
+    intel-media-va-driver \
+    vainfo \
     libssl-dev \
     libsrt-gnutls-dev \
     libfreetype-dev \

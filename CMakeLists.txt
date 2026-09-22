@@ -324,6 +324,14 @@ if(BUILD_TESTS)
     add_executable(test_srt tests/test_srt.c)
     target_link_libraries(test_srt PRIVATE zff-plugins zff-core ${SRT_LIBRARIES} pthread)
     add_test(NAME test_srt COMMAND test_srt)
+
+    add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
+    target_link_libraries(test_hwaccel_vaapi PRIVATE zff-plugins zff-core)
+    add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
+
+    add_executable(test_hwaccel_cuda tests/test_hwaccel_cuda.c)
+    target_link_libraries(test_hwaccel_cuda PRIVATE zff-plugins zff-core)
+    add_test(NAME test_hwaccel_cuda COMMAND test_hwaccel_cuda)
 endif()
 
 message(STATUS "zff configured successfully.")

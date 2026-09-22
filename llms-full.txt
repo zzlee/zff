@@ -11,19 +11,24 @@ is frozen; only its algorithms are ported).
 ## Architecture (two tiers)
 
 ```
-Application (100% standard FFmpeg API: AVFormatContext, AVFilterGraph, AVFrame)
+Application (100% standard FFmpeg API: AVFormatContext, AVFrame, AVPacket)
   ├── libzff-core.so — proprietary HW bridge (NvBufSurface/DMABUF, PTP time, SideData)
-  └── zstr_* plugins — native FFmpeg components (libavfilter/avformat/avdevice)
+  └── zstr_* plugins — AVFormat/AVDevice devices + C processing engines
 ```
+No `AVFilter`/`AVBitStreamFilter` implementations: out-of-tree filters are
+impossible with distro libav* headers (opaque `AVFilterPad`, no formats
+constructors, no `filter()` callback). Engines follow `zff_engine.h`
+(`alloc`/`create` → `process` → `flush` → `free(&ptr)`), kept compatible
+with a future in-tree FFmpeg port.
 
 ## Buffer rules (non-negotiable)
 
 1. **No custom buffer types.** Raw media = `AVFrame`, compressed/RTP = `AVPacket`, both governed by `AVBufferRef` refcounts.
-2. **Video frames**: allocate with `ff_get_video_buffer()` inside filters, `av_frame_alloc()` + `av_frame_get_buffer()` in devices.
-3. **Audio frames**: `ff_get_audio_buffer()` / same pattern.
-4. **Muxers/demuxers**: `av_packet_alloc()` / `av_packet_free()`.
-5. **Private metadata**: FourCC side-data tags (`ZSTR_TAG_*`), never TLV containers. `av_frame_get_side_data()` / `av_packet_get_side_data()` are O(1).
-6. **PTS convention**: nanoseconds in `zstr_aresample`; stream time_base elsewhere. Never invent timestamp types.
+2. **Video/audio frames**: engines allocate output buffers with `av_frame_get_buffer()`
+   (`ff_get_video_buffer()` is in-tree-only and unavailable out-of-tree).
+3. **Muxers/demuxers**: `av_packet_alloc()` / `av_packet_free()`.
+4. **Private metadata**: FourCC side-data tags (`ZSTR_TAG_*`), never TLV containers. `av_frame_get_side_data()` / `av_packet_get_side_data()` are O(1).
+5. **PTS convention**: nanoseconds in `zstr_aresample`; stream time_base elsewhere. Never invent timestamp types.
 
 ## Build & test (Docker only)
 
@@ -39,12 +44,22 @@ CMake options: `BUILD_TESTS=ON`, `BUILD_SHARED_LIBS=ON`, `ENABLE_JETSON=OFF`,
 Libraries: `libzff-core` (`src/core/`), `libzff-plugins` (`src/plugins/`).
 Tests: one `tests/test_<name>.c` per plugin, registered with `add_test`.
 
+## Install & consume
+
+```bash
+./scripts/package.sh            # dist/zff-<ver>-linux-x86_64.tar.gz (usr/ layout)
+DESTDIR=/tmp/stage cmake --install build-x86   # standard GNUInstallDirs install
+```
+Installed: versioned `.so` + headers + `zff-core.pc`/`zff-plugins.pc` +
+`zffConfig.cmake` (`find_package(zff)` → `zff::zff-plugins`). NOTE: prefix=`/`
+triggers GNUInstallDirs usrmerge rewriting — package with `/usr`.
+
 ## Coding conventions
 
 - **C11**, `zstr_*` prefix for plugins, `zff_*` for core. Snake_case.
-- **Tests must not put side effects in `assert()`**: Release defines `NDEBUG`,
-  so `assert(connect(...))` compiles the call away. Use a `CHECK` macro that
-  always evaluates (see `tests/test_rtsp_server.c`).
+- **Tests build with `-UNDEBUG`**, so `assert()` stays active even in Release;
+  still prefer the `CHECK` macro for calls with side effects (it prints
+  file:line before aborting — see `tests/test_rtsp_server.c`).
 - FFmpeg device pattern: C engine (`alloc/process/free`) + `FFOutputFormat` /
   `AVInputFormat` wrapper + `AVOption` table + registration in
   `src/plugins/zff_plugins.c`. Follow `zstr_net_sink.c` as the template.

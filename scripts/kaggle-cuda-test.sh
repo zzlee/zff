@@ -82,7 +82,7 @@ if need_ffmpeg_build; then
     make -j"$(nproc)" > /tmp/zffdeps/ffbuild.log 2>&1 \
         || { echo "FFmpeg build failed:"; tail -n 20 /tmp/zffdeps/ffbuild.log; exit 1; }
     make install > /tmp/zffdeps/ffinstall.log 2>&1
-    cd "${WORKDIR:-/kaggle/working/zff}"
+    cd /tmp/zffdeps
     echo "    FFmpeg $(pkg-config --modversion libavutil) ready at ${FFMPEG_PREFIX}"
 fi
 

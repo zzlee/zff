@@ -9,6 +9,9 @@ public libav* hwcontext API (`h264_nvenc` encode, CUDA-accelerated
 decode, HW frame upload/download). Only H264 is exercised (Turing
 NVENC/NVDEC on free GPUs lack AV1 encode).
 
+Proven versions (Sep 2026): worker driver 580.159.04 (NVENC API 13.0),
+nv-codec-headers `n13.0.19.1`, FFmpeg 6.1.2 source build.
+
 ## Path A — manual notebook (simplest first run)
 
 1. Kaggle → New Notebook → Settings → Accelerator: **GPU T4 x2**.

@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Run the zff CUDA integration test on Kaggle free GPU, fully from CLI.
 #
-# One-time setup:
-#   uv tool install kaggle                      # kaggle CLI via uv
-#   # kaggle.com -> Settings -> Account -> API -> Create New Token
-#   mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
+# One-time setup (pick one auth method):
+#   A. kaggle.json (classic):
+#        uv tool install kaggle
+#        # kaggle.com -> Settings -> Account -> API -> Create New Token
+#        mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
+#   B. access token (as in ~/vibecoding/kaggle-eval):
+#        # ~/.kaggle/access_token holds the token; username via env:
+#        export KAGGLE_USER=zzlee1234
 #
 # Usage:
 #   ./scripts/kaggle-run.sh [kernel-slug]       # default: zff-cuda-test
+#   KAGGLE_USER=zzlee1234 ./scripts/kaggle-run.sh
 #
 # Flow: kernels push (runs remotely) -> poll status -> fetch logs ->
 # exit 0 on KAGGLE_CUDA_RESULT=PASS, 1 otherwise.
@@ -24,16 +29,25 @@ command -v "${KAGGLE_BIN}" >/dev/null || {
     echo "kaggle CLI not found. Install: uv tool install kaggle" >&2
     exit 2
 }
-[ -f ~/.kaggle/kaggle.json ] || {
-    echo "~/.kaggle/kaggle.json missing. Create a token at kaggle.com/Settings." >&2
+# Auth: kaggle.json preferred; else access_token file + KAGGLE_USER.
+if [ -f ~/.kaggle/kaggle.json ]; then
+    USER_NAME="$(python3 -c "import json;print(json.load(open('$HOME/.kaggle/kaggle.json'))['username'])")"
+elif [ -f ~/.kaggle/access_token ]; then
+    USER_NAME="${KAGGLE_USER:-}"
+    if [ -z "${USER_NAME}" ]; then
+        echo "Set KAGGLE_USER (access_token file carries no username)." >&2
+        exit 2
+    fi
+    export KAGGLE_USERNAME="${USER_NAME}"
+    export KAGGLE_KEY="$(cat ~/.kaggle/access_token)"
+else
+    echo "No Kaggle auth: need ~/.kaggle/kaggle.json or ~/.kaggle/access_token." >&2
     exit 2
-}
+fi
 [ -d "${KERNEL_DIR}" ] || {
     echo "Kernel dir ${KERNEL_DIR} missing." >&2
     exit 2
 }
-
-USER_NAME="$(python3 -c "import json;print(json.load(open('$HOME/.kaggle/kaggle.json'))['username'])")"
 KERNEL_ID="${USER_NAME}/${SLUG}"
 
 # Fill the metadata id template on first run (keeps the file generic).

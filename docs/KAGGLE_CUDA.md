@@ -34,13 +34,15 @@ NVENC smoke test → apt build deps → clone/pull → native cmake build of
 
 ## Path B — full CLI from this machine (no browser)
 
-One-time setup:
+One-time setup (pick one auth method):
 
 ```bash
 uv tool install kaggle
-# kaggle.com → Settings → Account → API → Create New Token
+# A. classic: kaggle.com → Settings → Account → API → Create New Token
 mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/
 chmod 600 ~/.kaggle/kaggle.json
+# B. access token: put the token in ~/.kaggle/access_token and export the user:
+export KAGGLE_USER=zzlee1234
 ```
 
 Run:

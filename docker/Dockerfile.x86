@@ -43,6 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libva-drm2 \
     libva-x11-2 \
     intel-media-va-driver \
+    libmfx1 \
+    libvpl2 \
     vainfo \
     libssl-dev \
     libsrt-gnutls-dev \

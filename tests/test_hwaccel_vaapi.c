@@ -123,14 +123,47 @@ static void test_hwframe_xfer(void)
     printf("[PASS] HWFrames xfer passed.\n");
 }
 
-/* Encoded packets shared with the decode test */
-static AVPacket **g_pkts = NULL;
-static int g_nb_pkts = 0;
+/* Encoded packets shared with the decode tests */
+static AVPacket **g_h264_pkts = NULL;
+static int g_h264_nb = 0;
+static AVPacket **g_hevc_pkts = NULL;
+static int g_hevc_nb = 0;
 
-static void test_vaapi_encode(void)
+/* H.264: first packet must carry an IDR slice (NAL type 5) */
+static int has_h264_idr(const AVPacket *pkt)
 {
-    printf("[TEST] h264_vaapi encode %d frames...\n", NFRAMES);
-    const AVCodec *enc = avcodec_find_encoder_by_name("h264_vaapi");
+    for (int i = 0; i + 4 < pkt->size; i++) {
+        if (pkt->data[i] == 0 && pkt->data[i+1] == 0 &&
+            pkt->data[i+2] == 0 && pkt->data[i+3] == 1 &&
+            (pkt->data[i+4] & 0x1F) == 5) return 1;
+        if (pkt->data[i] == 0 && pkt->data[i+1] == 0 &&
+            pkt->data[i+2] == 1 &&
+            (pkt->data[i+3] & 0x1F) == 5) return 1;
+    }
+    return 0;
+}
+
+/* HEVC: NAL type lives in bits 1..6 of the first header byte;
+ * 19 = IDR_W_RADL, 20 = IDR_N_LP, 21 = CRA */
+static int has_hevc_idr(const AVPacket *pkt)
+{
+    for (int i = 0; i + 4 < pkt->size; i++) {
+        int off = -1;
+        if (pkt->data[i] == 0 && pkt->data[i+1] == 0 &&
+            pkt->data[i+2] == 0 && pkt->data[i+3] == 1) off = i + 4;
+        else if (pkt->data[i] == 0 && pkt->data[i+1] == 0 &&
+                 pkt->data[i+2] == 1) off = i + 3;
+        if (off > 0) {
+            int t = (pkt->data[off] >> 1) & 0x3F;
+            if (t == 19 || t == 20 || t == 21) return 1;
+        }
+    }
+    return 0;
+}
+
+static void encode_codec(const char *enc_name, AVPacket ***out_pkts, int *out_nb)
+{
+    const AVCodec *enc = avcodec_find_encoder_by_name(enc_name);
     CHECK(enc != NULL);
 
     AVBufferRef *frames = make_frames_ctx();
@@ -154,8 +187,9 @@ static void test_vaapi_encode(void)
     CHECK(av_frame_get_buffer(sw, 0) == 0);
 
     size_t total_bytes = 0;
-    g_pkts = calloc(NFRAMES * 2, sizeof(AVPacket *));
-    CHECK(g_pkts != NULL);
+    AVPacket **pkts = calloc(NFRAMES * 2, sizeof(AVPacket *));
+    CHECK(pkts != NULL);
+    int nb = 0;
 
     for (int i = 0; i < NFRAMES; i++) {
         CHECK(av_frame_make_writable(sw) == 0);
@@ -170,7 +204,7 @@ static void test_vaapi_encode(void)
         AVPacket *pkt = av_packet_alloc();
         while (avcodec_receive_packet(ec, pkt) == 0) {
             total_bytes += pkt->size;
-            g_pkts[g_nb_pkts++] = pkt;
+            pkts[nb++] = pkt;
             pkt = av_packet_alloc();
         }
         av_packet_free(&pkt);
@@ -179,31 +213,38 @@ static void test_vaapi_encode(void)
     AVPacket *pkt = av_packet_alloc();
     while (avcodec_receive_packet(ec, pkt) == 0) {
         total_bytes += pkt->size;
-        g_pkts[g_nb_pkts++] = pkt;
+        pkts[nb++] = pkt;
         pkt = av_packet_alloc();
     }
     av_packet_free(&pkt);
 
-    printf("[INFO] Encoded %d packets, %zu bytes.\n", g_nb_pkts, total_bytes);
-    CHECK(g_nb_pkts > 0 && total_bytes > 500);
-    /* First packet must be an IDR (NAL type 5) with SPS/PPS */
-    {
-        int is_idr = 0;
-        for (int i = 0; i + 4 < g_pkts[0]->size; i++) {
-            if (g_pkts[0]->data[i] == 0 && g_pkts[0]->data[i+1] == 0 &&
-                g_pkts[0]->data[i+2] == 0 && g_pkts[0]->data[i+3] == 1 &&
-                (g_pkts[0]->data[i+4] & 0x1F) == 5) { is_idr = 1; break; }
-            if (g_pkts[0]->data[i] == 0 && g_pkts[0]->data[i+1] == 0 &&
-                g_pkts[0]->data[i+2] == 1 &&
-                (g_pkts[0]->data[i+3] & 0x1F) == 5) { is_idr = 1; break; }
-        }
-        CHECK(is_idr);
-    }
+    printf("[INFO] %s: %d packets, %zu bytes.\n", enc_name, nb, total_bytes);
+    CHECK(nb > 0 && total_bytes > 500);
+    if (!strcmp(enc_name, "h264_vaapi"))
+        CHECK(has_h264_idr(pkts[0]));
+    else
+        CHECK(has_hevc_idr(pkts[0]));
 
     av_frame_free(&sw);
     avcodec_free_context(&ec);
     av_buffer_unref(&frames);
+    *out_pkts = pkts;
+    *out_nb = nb;
+}
+
+static void test_vaapi_encode(void)
+{
+    printf("[TEST] h264_vaapi encode %d frames...\n", NFRAMES);
+    encode_codec("h264_vaapi", &g_h264_pkts, &g_h264_nb);
     printf("[PASS] VAAPI encode passed.\n");
+}
+
+/* HEVC (H.265) encode path: same shape, IDR is NAL types 19/20/21 */
+static void test_hevc_encode(void)
+{
+    printf("[TEST] hevc_vaapi encode %d frames...\n", NFRAMES);
+    encode_codec("hevc_vaapi", &g_hevc_pkts, &g_hevc_nb);
+    printf("[PASS] HEVC encode passed.\n");
 }
 
 static enum AVPixelFormat vaapi_get_format(AVCodecContext *ctx,
@@ -217,10 +258,11 @@ static enum AVPixelFormat vaapi_get_format(AVCodecContext *ctx,
     return AV_PIX_FMT_NONE;
 }
 
-static void test_vaapi_decode(void)
+static void decode_codec(enum AVCodecID codec_id, const char *label,
+                         AVPacket **pkts, int nb_pkts)
 {
-    printf("[TEST] VAAPI decode of own packets...\n");
-    const AVCodec *dec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    printf("[TEST] VAAPI decode %s packets...\n", label);
+    const AVCodec *dec = avcodec_find_decoder(codec_id);
     CHECK(dec != NULL);
     AVCodecContext *dc = avcodec_alloc_context3(dec);
     CHECK(dc != NULL);
@@ -237,8 +279,8 @@ static void test_vaapi_decode(void)
     int saw_hw = 0;
     long y_sum = 0;
     AVFrame *f = av_frame_alloc();
-    for (int i = 0; i < g_nb_pkts; i++) {
-        CHECK(avcodec_send_packet(dc, g_pkts[i]) == 0);
+    for (int i = 0; i < nb_pkts; i++) {
+        CHECK(avcodec_send_packet(dc, pkts[i]) == 0);
         while (avcodec_receive_frame(dc, f) == 0) {
             got_frames++;
             if (f->format == AV_PIX_FMT_VAAPI) {
@@ -259,8 +301,8 @@ static void test_vaapi_decode(void)
         got_frames++;
         av_frame_unref(f);
     }
-    printf("[INFO] Decoded %d frames (hw=%d, y_sum=%ld).\n",
-           got_frames, saw_hw, y_sum);
+    printf("[INFO] %s decoded %d frames (hw=%d, y_sum=%ld).\n",
+           label, got_frames, saw_hw, y_sum);
     CHECK(got_frames >= NFRAMES - 2);
     CHECK(saw_hw);
     CHECK(y_sum > 0); /* gradient content survived the roundtrip */
@@ -268,7 +310,18 @@ static void test_vaapi_decode(void)
     av_frame_free(&f);
     avcodec_free_context(&dc);
     av_buffer_unref(&hw_dev);
+}
+
+static void test_vaapi_decode(void)
+{
+    decode_codec(AV_CODEC_ID_H264, "H264", g_h264_pkts, g_h264_nb);
     printf("[PASS] VAAPI decode passed.\n");
+}
+
+static void test_hevc_decode(void)
+{
+    decode_codec(AV_CODEC_ID_HEVC, "HEVC", g_hevc_pkts, g_hevc_nb);
+    printf("[PASS] HEVC decode passed.\n");
 }
 
 int main(void)
@@ -289,9 +342,13 @@ int main(void)
     test_hwframe_xfer();
     test_vaapi_encode();
     test_vaapi_decode();
+    test_hevc_encode();
+    test_hevc_decode();
 
-    for (int i = 0; i < g_nb_pkts; i++) av_packet_free(&g_pkts[i]);
-    free(g_pkts);
+    for (int i = 0; i < g_h264_nb; i++) av_packet_free(&g_h264_pkts[i]);
+    free(g_h264_pkts);
+    for (int i = 0; i < g_hevc_nb; i++) av_packet_free(&g_hevc_pkts[i]);
+    free(g_hevc_pkts);
     av_buffer_unref(&g_dev);
 
     printf("====================================================\n");

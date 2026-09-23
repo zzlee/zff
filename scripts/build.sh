@@ -6,6 +6,9 @@
 #
 # Variants:
 #   x86 (or dev)       Build using zff-build:x86 image (outputs to build-x86/)
+#   xlnk2_arm64        Cross-compile for Xilinx SC6f0 (Petalinux) using the
+#                      yuan88yuan/qcap-build:xlnk2_arm64-base image.
+#                      Output: build-xlnk2_arm64/ (binaries need target HW to run)
 #   jetson             Build using zff-build:jetson image (future)
 #   petalinux          Build using zff-build:petalinux image (future)
 #
@@ -36,6 +39,10 @@ case "${VARIANT}" in
         IMAGE="zff-build:x86"
         DEFAULT_BUILD_DIR="build-x86"
         ;;
+    xlnk2_arm64)
+        # Cross build needs the qcap toolchain env; handled below.
+        DEFAULT_BUILD_DIR="build-xlnk2_arm64"
+        ;;
     jetson)
         IMAGE="zff-build:jetson"
         DEFAULT_BUILD_DIR="build-jetson"
@@ -52,6 +59,41 @@ esac
 
 OUT_DIR="${BUILD_DIR:-${DEFAULT_BUILD_DIR}}"
 mkdir -p "${REPO_ROOT}/${OUT_DIR}"
+
+if [[ "${VARIANT}" == "xlnk2_arm64" ]]; then
+    # Cross-compile with the qcap toolchain (mirrors zstreamer's
+    # build_xlnk2_arm64); headless target => no display sinks, no
+    # WebRTC/SVT (auto-degrade if absent from the SDK sysroot).
+    # Binaries are ARM64 and cannot run here; BUILD_TESTS=ON still
+    # proves compilation. ctest runs on target HW only.
+    IMAGE="${QCAP_BUILD_IMAGE:-yuan88yuan/qcap-build:xlnk2_arm64-base}"
+    echo "==> Cross-building zff for [${VARIANT}] inside ${IMAGE}..."
+    echo "==> Output directory: ${OUT_DIR}"
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -e HOME="${HOME}" \
+        -v "${REPO_ROOT}:/workspace" \
+        -w /workspace \
+        "${IMAGE}" \
+        bash -lc "
+            source /opt/qcap-dev-init &&
+            unset PKG_CONFIG_SYSROOT_DIR &&
+            export PKG_CONFIG_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&
+            cmake -B ${OUT_DIR} -S . -G Ninja \
+                -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+                -DBUILD_TESTS=${BUILD_TESTS} \
+                -DBUILD_SHARED_LIBS=ON \
+                -DENABLE_DISPLAY=OFF \
+                -DCMAKE_PREFIX_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64 \
+                -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+                -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
+                -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+                \"\$@\" &&
+            cmake --build ${OUT_DIR} --parallel \$(nproc)
+        " bash "$@"
+    echo "==> Build complete! Artifacts are in ${OUT_DIR}/"
+    exit 0
+fi
 
 echo "==> Building zff for [${VARIANT}] inside ${IMAGE}..."
 echo "==> Output directory: ${OUT_DIR}"

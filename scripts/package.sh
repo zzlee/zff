@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Package a zff release tarball (x86_64).
-# Usage: ./scripts/package.sh [version]   (default: ./scripts/version.sh get)
+# Package a zff release tarball.
+# Usage: ./scripts/package.sh [version] [arch]
+#   version default: ./scripts/version.sh get
+#   arch: x86_64 (default) | aarch64 (Xilinx SC6f0 cross via qcap image)
 #
-# Produces dist/zff-<version>-linux-x86_64.tar.gz containing:
+# Produces dist/zff-<version>-linux-<arch>.tar.gz containing:
 #   usr/{lib/libzff-*.so*, include/zff/, lib/{cmake,pkgconfig}},
 #   docs (README/ARCHITECTURE/ELEMENTS/ROADMAP/llms*), examples/webrtc_page.
 # NOTE: prefix=/ triggers GNUInstallDirs usrmerge rewriting (usr/lib);
@@ -18,35 +20,54 @@ VERSION="$(echo "${VERSION}" | tr -d '[:space:]' | sed 's/^v//')"
     echo "Invalid version '${VERSION}'" >&2
     exit 1
 }
-
-IMAGE="zff-build:x86"
+ARCH="${2:-x86_64}"
+case "${ARCH}" in
+    x86_64)
+        IMAGE="zff-build:x86"
+        BUILD_CMAKE_ARGS="-DBUILD_SHARED_LIBS=ON"
+        BUILD_ENV_PRE=""
+        ;;
+    aarch64)
+        IMAGE="${QCAP_BUILD_IMAGE:-yuan88yuan/qcap-build:xlnk2_arm64-base}"
+        # Headless target: no display sinks; WebRTC/SVT auto-degrade.
+        BUILD_CMAKE_ARGS="-DBUILD_SHARED_LIBS=ON -DENABLE_DISPLAY=OFF -DCMAKE_PREFIX_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64 -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH"
+        BUILD_ENV_PRE="source /opt/qcap-dev-init && unset PKG_CONFIG_SYSROOT_DIR && export PKG_CONFIG_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&"
+        ;;
+    *)
+        echo "Unknown arch '${ARCH}' (x86_64|aarch64)" >&2
+        exit 1
+        ;;
+esac
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    echo "Builder image '${IMAGE}' missing; run ./scripts/build-docker.sh x86 first." >&2
+    echo "Builder image '${IMAGE}' missing." >&2
     exit 1
 fi
 
-PKG_BUILD_DIR="build-pkg"
+PKG_BUILD_DIR="build-pkg-${ARCH}"
 STAGE="dist/stage"
-ARCHIVE="dist/zff-${VERSION}-linux-x86_64.tar.gz"
+ARCHIVE="dist/zff-${VERSION}-linux-${ARCH}.tar.gz"
 rm -rf "${REPO_ROOT}/${PKG_BUILD_DIR}" "${REPO_ROOT}/${STAGE}" "${REPO_ROOT}/${ARCHIVE}"
 mkdir -p "${REPO_ROOT}/dist"
 
-echo "==> Building release in ${IMAGE}..."
+echo "==> Building release (${ARCH}) in ${IMAGE}..."
 mkdir -p "${REPO_ROOT}/${PKG_BUILD_DIR}"
 docker run --rm \
     -u "$(id -u):$(id -g)" \
+    -e HOME="${HOME}" \
     -v "${REPO_ROOT}:/workspace" \
     -w "/workspace/${PKG_BUILD_DIR}" \
     "${IMAGE}" \
-    bash -c "
+    bash -lc "
         set -euo pipefail
+        ${BUILD_ENV_PRE}
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
-            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib .. &&
+            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+            ${BUILD_CMAKE_ARGS} .. &&
         ninja zff-core zff-plugins demo_webrtc_page
     "
 
 echo "==> Installing to stage via cmake --install..."
-STAGE_ABS="${REPO_ROOT}/${STAGE}/zff-${VERSION}-linux-x86_64"
+STAGE_ABS="${REPO_ROOT}/${STAGE}/zff-${VERSION}-linux-${ARCH}"
 mkdir -p "${STAGE_ABS}/examples/webrtc_page"
 docker run --rm \
     -u "$(id -u):$(id -g)" \
@@ -55,7 +76,7 @@ docker run --rm \
     "${IMAGE}" \
     bash -c "
         set -euo pipefail
-        DESTDIR=/workspace/${STAGE}/zff-${VERSION}-linux-x86_64 \
+        DESTDIR=/workspace/${STAGE}/zff-${VERSION}-linux-${ARCH} \
             cmake --install .
     "
 for doc in README.md ARCHITECTURE.md ELEMENTS.md ROADMAP.md llms.txt llms-full.txt VERSION; do

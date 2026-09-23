@@ -8,9 +8,11 @@
 #include "zff/plugins/zstr_alsa.h"
 #include "zff/plugins/zstr_v4l2_sink.h"
 #include "zff/plugins/zstr_alsa_sink.h"
+#ifdef HAS_DISPLAY
 #include "zff/plugins/zstr_glsink.h"
 #include "zff/plugins/zstr_x11sink.h"
 #include "zff/plugins/zstr_gl_comp.h"
+#endif
 #include "zff/plugins/zstr_net.h"
 #include "zff/plugins/zstr_rtsp_server.h"
 #include "zff/plugins/zstr_hls_sink.h"
@@ -30,9 +32,11 @@ int zff_plugins_register_all(void) {
     zff_register_input_format(&ff_zstr_srt_source_demuxer);
     zff_register_output_format(&ff_zstr_v4l2_sink_muxer.p);
     zff_register_output_format(&ff_zstr_alsa_sink_muxer.p);
+#ifdef HAS_DISPLAY
     zff_register_output_format(&ff_zstr_glsink_muxer.p);
     zff_register_output_format(&ff_zstr_x11sink_muxer.p);
     zff_register_output_format(&ff_zstr_gl_comp_muxer.p);
+#endif
     zff_register_output_format(&ff_zstr_net_sink_muxer.p);
     zff_register_output_format(&ff_zstr_rtspserver_muxer.p);
     zff_register_output_format(&ff_zstr_hls_sink_muxer.p);

@@ -17,6 +17,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 option(ENABLE_JETSON "Enable NVIDIA Jetson NvBufSurface support" OFF)
 option(ENABLE_DANTE "Enable Dante DEP protocol support" ON)
+option(ENABLE_DISPLAY "Enable GL/X11 display sinks (glsink, gl_comp, x11sink)" ON)
 
 if(ENABLE_JETSON)
     add_compile_definitions(ENABLE_JETSON=1)
@@ -33,8 +34,13 @@ pkg_check_modules(AVDEVICE REQUIRED libavdevice>=60)
 pkg_check_modules(SWSCALE REQUIRED libswscale>=7)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample>=4)
 pkg_check_modules(ALSA REQUIRED alsa)
-pkg_check_modules(GL REQUIRED gl)
-pkg_check_modules(X11 REQUIRED x11)
+if(ENABLE_DISPLAY)
+    pkg_check_modules(GL REQUIRED gl)
+    pkg_check_modules(X11 REQUIRED x11)
+    add_compile_definitions(HAS_DISPLAY=1)
+else()
+    message(STATUS "Display sinks disabled (glsink, gl_comp, x11sink)")
+endif()
 pkg_check_modules(FREETYPE freetype2)
 find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
 find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
@@ -135,10 +141,7 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_v4l2_sink.c
     src/plugins/devices/zstr_alsa_sink.c
     src/plugins/audio/zstr_amix.c
-    src/plugins/video/zstr_glsink.c
-    src/plugins/video/zstr_x11sink.c
     src/plugins/video/zstr_text_overlay.c
-    src/plugins/video/zstr_gl_comp.c
     src/plugins/streaming/zstr_net_source.c
     src/plugins/streaming/zstr_net_sink.c
     src/plugins/streaming/zstr_hls_sink.c
@@ -174,6 +177,14 @@ if(HAS_WEBRTC)
         src/plugins/streaming/zstr_webrtc_whep.c
     )
     add_compile_definitions(HAS_WEBRTC=1)
+endif()
+
+if(ENABLE_DISPLAY)
+    list(APPEND PLUGINS_SOURCES
+        src/plugins/video/zstr_glsink.c
+        src/plugins/video/zstr_x11sink.c
+        src/plugins/video/zstr_gl_comp.c
+    )
 endif()
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -273,14 +284,17 @@ if(BUILD_TESTS)
     target_link_libraries(test_amix PRIVATE zff-plugins zff-core ${SWRESAMPLE_LIBRARIES} m)
     add_test(NAME test_amix COMMAND test_amix)
 
+if(ENABLE_DISPLAY)
     add_executable(test_glsink tests/test_glsink.c)
     target_link_libraries(test_glsink PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES})
     add_test(NAME test_glsink COMMAND test_glsink)
+endif()
 
     add_executable(test_text_overlay tests/test_text_overlay.c)
     target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
     add_test(NAME test_text_overlay COMMAND test_text_overlay)
 
+if(ENABLE_DISPLAY)
     add_executable(test_x11sink tests/test_x11sink.c)
     target_link_libraries(test_x11sink PRIVATE zff-plugins zff-core ${X11_LIBRARIES} ${SWSCALE_LIBRARIES})
     add_test(NAME test_x11sink COMMAND test_x11sink)
@@ -288,6 +302,7 @@ if(BUILD_TESTS)
     add_executable(test_gl_comp tests/test_gl_comp.c)
     target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)
     add_test(NAME test_gl_comp COMMAND test_gl_comp)
+endif()
 
     add_executable(test_net tests/test_net.c)
     target_link_libraries(test_net PRIVATE zff-plugins zff-core pthread)

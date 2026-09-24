@@ -28,10 +28,10 @@ case "${ARCH}" in
         BUILD_ENV_PRE=""
         ;;
     aarch64)
-        IMAGE="${QCAP_BUILD_IMAGE:-yuan88yuan/qcap-build:xlnk2_arm64-base}"
+        IMAGE="${QCAP_BUILD_IMAGE:-zff-build:xlnk2_arm64}"
         # Headless target: no display sinks; WebRTC/SVT auto-degrade.
-        BUILD_CMAKE_ARGS="-DBUILD_SHARED_LIBS=ON -DENABLE_DISPLAY=OFF -DCMAKE_PREFIX_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64 -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH"
-        BUILD_ENV_PRE="source /opt/qcap-dev-init && unset PKG_CONFIG_SYSROOT_DIR && export PKG_CONFIG_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&"
+        BUILD_CMAKE_ARGS="-DBUILD_SHARED_LIBS=ON -DENABLE_DISPLAY=OFF -DCMAKE_PREFIX_PATH=/opt/zff-ffmpeg-xlnk2\;/opt/qcap/qcap-3rdparty/xlnk2_arm64 -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH"
+        BUILD_ENV_PRE="source /opt/qcap-dev-init && unset PKG_CONFIG_SYSROOT_DIR && export PKG_CONFIG_PATH=/opt/zff-ffmpeg-xlnk2/lib/pkgconfig:/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&"
         ;;
     *)
         echo "Unknown arch '${ARCH}' (x86_64|aarch64)" >&2
@@ -63,7 +63,8 @@ docker run --rm \
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
             -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
             ${BUILD_CMAKE_ARGS} .. &&
-        ninja zff-core zff-plugins demo_webrtc_page
+        ninja zff-core zff-plugins &&
+        (ninja demo_webrtc_page || echo '(demo skipped: WebRTC unavailable)')
     "
 
 echo "==> Installing to stage via cmake --install..."
@@ -89,7 +90,7 @@ cp "${REPO_ROOT}/examples/webrtc_page/index.html" \
     "${STAGE_ABS}/examples/webrtc_page/"
 
 echo "==> Archiving ${ARCHIVE}..."
-tar -czf "${REPO_ROOT}/${ARCHIVE}" -C "${REPO_ROOT}/${STAGE}" "zff-${VERSION}-linux-x86_64"
+tar -czf "${REPO_ROOT}/${ARCHIVE}" -C "${REPO_ROOT}/${STAGE}" "zff-${VERSION}-linux-${ARCH}"
 rm -rf "${REPO_ROOT}/${PKG_BUILD_DIR}" "${REPO_ROOT}/${STAGE}"
 ls -lh "${REPO_ROOT}/${ARCHIVE}"
 echo "==> Done."

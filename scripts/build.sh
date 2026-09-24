@@ -66,7 +66,7 @@ if [[ "${VARIANT}" == "xlnk2_arm64" ]]; then
     # WebRTC/SVT (auto-degrade if absent from the SDK sysroot).
     # Binaries are ARM64 and cannot run here; BUILD_TESTS=ON still
     # proves compilation. ctest runs on target HW only.
-    IMAGE="${QCAP_BUILD_IMAGE:-yuan88yuan/qcap-build:xlnk2_arm64-base}"
+    IMAGE="${QCAP_BUILD_IMAGE:-zff-build:xlnk2_arm64}"
     echo "==> Cross-building zff for [${VARIANT}] inside ${IMAGE}..."
     echo "==> Output directory: ${OUT_DIR}"
     docker run --rm \
@@ -78,7 +78,7 @@ if [[ "${VARIANT}" == "xlnk2_arm64" ]]; then
         bash -lc "
             source /opt/qcap-dev-init &&
             unset PKG_CONFIG_SYSROOT_DIR &&
-            export PKG_CONFIG_PATH=/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&
+            export PKG_CONFIG_PATH=/opt/zff-ffmpeg-xlnk2/lib/pkgconfig:/opt/qcap/qcap-3rdparty/xlnk2_arm64/lib/pkgconfig:\${SDKTARGETSYSROOT}/usr/lib/pkgconfig &&
             cmake -B ${OUT_DIR} -S . -G Ninja \
                 -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
                 -DBUILD_TESTS=${BUILD_TESTS} \

@@ -42,8 +42,18 @@ else()
     message(STATUS "Display sinks disabled (glsink, gl_comp, x11sink)")
 endif()
 pkg_check_modules(FREETYPE freetype2)
-find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
-find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
+# SRT via pkg-config first (cross-friendly: honors PKG_CONFIG_PATH into
+# sysroots/3rdparty); legacy host-path fallback otherwise.
+pkg_check_modules(SRT srt)
+if(NOT SRT_FOUND)
+    find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
+    find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
+endif()
+# OpenSSL backs SRT (and 3rdparty ships its own copy for cross).
+pkg_check_modules(SSL openssl)
+if(NOT SSL_FOUND)
+    find_library(SSL_LIBRARIES NAMES ssl crypto)
+endif()
 
 # SVT-JPEG-XS (ST 2110-22 software codec, optional)
 pkg_check_modules(SVT_JPEGXS SvtJpegxs)
@@ -83,6 +93,7 @@ include_directories(
     ${X11_INCLUDE_DIRS}
     ${FREETYPE_INCLUDE_DIRS}
     ${SRT_INCLUDE_DIRS}
+    ${SSL_INCLUDE_DIRS}
 )
 
 # Library directories: bare -l flags rely on the default search path, which
@@ -100,6 +111,8 @@ link_directories(
     ${GL_LIBRARY_DIRS}
     ${X11_LIBRARY_DIRS}
     ${FREETYPE_LIBRARY_DIRS}
+    ${SRT_LIBRARY_DIRS}
+    ${SSL_LIBRARY_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -127,6 +140,8 @@ target_link_libraries(zff-core
     ${AVCODEC_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVFILTER_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
 )
 
 # Plugins Library (libzff-plugins)
@@ -232,6 +247,8 @@ target_link_libraries(zff-plugins
     ${X11_LIBRARIES}
     ${FREETYPE_LIBRARIES}
     ${SRT_LIBRARIES}
+    $<$<BOOL:${SRT_FOUND}>:stdc++>
+    ${SSL_LIBRARIES}
     m
     pthread
 )
@@ -358,12 +375,19 @@ endif()
     target_link_libraries(test_srt PRIVATE zff-plugins zff-core ${SRT_LIBRARIES} pthread)
     add_test(NAME test_srt COMMAND test_srt)
 
-    add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
-    # NOTE: links zff-core only (not zff-plugins): these tests exercise
-    # native libav* HW APIs and must not inherit the GL/X11 link closure,
-    # whose distro/NVIDIA skew breaks exe links on GPU boxes.
-    target_link_libraries(test_hwaccel_vaapi PRIVATE zff-core)
-    add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
+    # VAAPI test needs libva headers (absent on headless cross SDKs).
+    include(CheckIncludeFile)
+    check_include_file("va/va.h" HAVE_VA_H)
+    if(HAVE_VA_H)
+        add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
+        # NOTE: links zff-core only (not zff-plugins): these tests exercise
+        # native libav* HW APIs and must not inherit the GL/X11 link closure,
+        # whose distro/NVIDIA skew breaks exe links on GPU boxes.
+        target_link_libraries(test_hwaccel_vaapi PRIVATE zff-core)
+        add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
+    else()
+        message(STATUS "va/va.h not found, skipping test_hwaccel_vaapi")
+    endif()
 
     add_executable(test_hwaccel_cuda tests/test_hwaccel_cuda.c)
     target_link_libraries(test_hwaccel_cuda PRIVATE zff-core)

@@ -1,0 +1,51 @@
+#===============================================================================
+#  zff — Xilinx SC6f0 (xlnk2_arm64) cross builder
+#
+#  FROM the qcap Petalinux SDK image (Yocto toolchain + sysroot + 3rdparty).
+#  Adds a self-built FFmpeg 6.1 (the 3rdparty ships 5.1, below zff's
+#  minimum of libavutil>=58; cf. Kaggle, which builds 6.1 for the same
+#  reason) into /opt/zff-ffmpeg-xlnk2 using the SDK cross toolchain.
+#
+#  Sbom of expectations (mirrors zstreamer's build_xlnk2_arm64):
+#   - source /opt/qcap-dev-init  -> SDKTARGETSYSROOT, cross CC, Yocto env
+#   - PKG_CONFIG_PATH            -> ours + 3rdparty + sysroot (see build.sh)
+#   - webRTC/SVT absent          -> auto-degrade (HAS_WEBRTC/HAS_SVT_JPEGXS OFF)
+#   - display sinks OFF          -> build.sh passes -DENABLE_DISPLAY=OFF
+#   - ARM64 binaries: build here, run on target HW only (no qemu)
+#===============================================================================
+
+FROM yuan88yuan/qcap-build:xlnk2_arm64-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# FFmpeg 6.1.x cross-build (matches the x86 builder's major version).
+# Pinned minor: 6.1.2 (proven on Kaggle with the same flags).
+ARG FFMPEG_VERSION=6.1.2
+
+RUN bash -lc " \
+    source /opt/qcap-dev-init && \
+    export PATH=\"/opt/sc6f0/sysroots/x86_64-petalinux-linux/usr/bin:\$PATH\" && \
+    mkdir -p /tmp/zffdeps && cd /tmp/zffdeps && \
+    (curl -fsSL -o ffmpeg-${FFMPEG_VERSION}.tar.xz \
+        https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz || \
+     wget -O ffmpeg-${FFMPEG_VERSION}.tar.xz \
+        https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz) && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/opt/zff-ffmpeg-xlnk2 \
+        --libdir=/opt/zff-ffmpeg-xlnk2/lib \
+        --cross-prefix=aarch64-xilinx-linux- \
+        --arch=aarch64 --target-os=linux --enable-cross-compile \
+        --disable-static --enable-shared --disable-doc --disable-debug \
+        --disable-programs \
+        --extra-cflags=\"--sysroot=\$SDKTARGETSYSROOT\" \
+        --extra-ldflags=\"--sysroot=\$SDKTARGETSYSROOT\" \
+        > /tmp/zffdeps/ffconfig.log 2>&1 && \
+    make -j\$(nproc) > /tmp/zffdeps/ffbuild.log 2>&1 && \
+    make install > /tmp/zffdeps/ffinstall.log 2>&1 && \
+    cd / && rm -rf /tmp/zffdeps && \
+    ls /opt/zff-ffmpeg-xlnk2/lib/libavutil.so.* \
+"
+
+CMD ["/bin/bash"]

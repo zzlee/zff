@@ -3,7 +3,9 @@
 =============================================================================*/
 #include "zff/zff_hw.h"
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <libavutil/error.h>
 #include <libavutil/mem.h>
 #include <libavutil/hwcontext_drm.h>
 
@@ -88,8 +90,10 @@ static void free_dmabuf_cb(void *opaque, uint8_t *data) {
     av_free(data);
 }
 
-AVFrame* zff_dmabuf_wrap_frame(int dmabuf_fd, size_t size, int width, int height, uint32_t drm_format) {
-    if (dmabuf_fd < 0) return NULL;
+static AVFrame* wrap_dmabuf_desc(int dmabuf_fd, size_t size, int width, int height,
+                                 uint32_t drm_format,
+                                 const ZffDRMPlane *planes, int nb_planes) {
+    if (dmabuf_fd < 0 || width <= 0 || height <= 0) return NULL;
     AVFrame *frame = av_frame_alloc();
     if (!frame) return NULL;
 
@@ -103,15 +107,26 @@ AVFrame* zff_dmabuf_wrap_frame(int dmabuf_fd, size_t size, int width, int height
         return NULL;
     }
 
+    if (planes) {
+        if (nb_planes < 1) nb_planes = 1;
+        if (nb_planes > 4) nb_planes = 4;
+    } else {
+        planes = NULL;
+        nb_planes = 1;
+    }
+
     desc->nb_objects = 1;
     desc->objects[0].fd = dmabuf_fd;
     desc->objects[0].size = size;
     desc->nb_layers = 1;
     desc->layers[0].format = drm_format;
-    desc->layers[0].nb_planes = 1;
-    desc->layers[0].planes[0].object_index = 0;
-    desc->layers[0].planes[0].offset = 0;
-    desc->layers[0].planes[0].pitch = width * 4; // default assumption, caller can customize
+    desc->layers[0].nb_planes = nb_planes;
+    for (int i = 0; i < nb_planes; i++) {
+        desc->layers[0].planes[i].object_index = planes ? planes[i].object_index : 0;
+        desc->layers[0].planes[i].offset       = planes ? planes[i].offset       : 0;
+        desc->layers[0].planes[i].pitch        = planes ? planes[i].pitch
+                                                        : (uint32_t)(width * 4);
+    }
 
     frame->buf[0] = av_buffer_create((uint8_t*)desc, sizeof(*desc),
                                      free_dmabuf_cb, (void*)(intptr_t)dmabuf_fd, 0);
@@ -122,4 +137,50 @@ AVFrame* zff_dmabuf_wrap_frame(int dmabuf_fd, size_t size, int width, int height
     }
     frame->data[0] = (uint8_t*)desc;
     return frame;
+}
+
+AVFrame* zff_dmabuf_wrap_frame_planes(int dmabuf_fd, size_t size, int width, int height,
+                                      uint32_t drm_format,
+                                      const ZffDRMPlane *planes, int nb_planes) {
+    return wrap_dmabuf_desc(dmabuf_fd, size, width, height, drm_format, planes, nb_planes);
+}
+
+AVFrame* zff_dmabuf_wrap_frame(int dmabuf_fd, size_t size, int width, int height, uint32_t drm_format) {
+    ZffDRMPlane default_planes[2];
+    if (drm_format == ZFF_DRM_FORMAT_NV12 || drm_format == ZFF_DRM_FORMAT_NV16 ||
+        drm_format == ZFF_DRM_FORMAT_NV21) {
+        /* Semi-planar 4:2:0 (NV12/NV21) or 4:2:2 (NV16): Y then interleaved UV,
+         * dense layout (no padding), chroma plane at offset width*height. */
+        default_planes[0] = (ZffDRMPlane){ .object_index = 0, .offset = 0,
+                                           .pitch = (uint32_t)width };
+        default_planes[1] = (ZffDRMPlane){ .object_index = 0,
+                                           .offset = (uint32_t)((size_t)width * height),
+                                           .pitch = (uint32_t)width };
+        return wrap_dmabuf_desc(dmabuf_fd, size, width, height, drm_format,
+                                default_planes, 2);
+    }
+    /* Generic packed fallback (e.g. XRGB8888): one plane, 4 bytes per pixel. */
+    default_planes[0] = (ZffDRMPlane){ .object_index = 0, .offset = 0,
+                                       .pitch = (uint32_t)(width * 4) };
+    return wrap_dmabuf_desc(dmabuf_fd, size, width, height, drm_format,
+                            default_planes, 1);
+}
+
+int zff_packet_set_dmabuf(AVPacket *pkt, const ZffDMABufInfo *info) {
+    if (!pkt || !info) return AVERROR(EINVAL);
+    uint8_t *data = av_packet_new_side_data(pkt, (enum AVPacketSideDataType)ZSTR_TAG_DMAB,
+                                            sizeof(*info));
+    if (!data) return AVERROR(ENOMEM);
+    memcpy(data, info, sizeof(*info));
+    return 0;
+}
+
+int zff_packet_get_dmabuf(const AVPacket *pkt, ZffDMABufInfo *out) {
+    if (!pkt || !out) return AVERROR(EINVAL);
+    size_t size = 0;
+    const uint8_t *data = av_packet_get_side_data(pkt, (enum AVPacketSideDataType)ZSTR_TAG_DMAB,
+                                                  &size);
+    if (!data || size < sizeof(*out)) return AVERROR(ENOENT);
+    memcpy(out, data, sizeof(*out));
+    return 0;
 }

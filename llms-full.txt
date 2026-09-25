@@ -85,7 +85,7 @@ Devices (`libavdevice`-style indev/outdev, `src/plugins/devices/`):
 |---|---|---|---|
 | `zstr_videotestsrc` | indev | `video_test_src.c` | bars/gradient/checker/noise/black; `pixel_format` yuv420p/i420/yv12→420P,nv12,nv16,yuyv422,rgb24,bgr24,rgba,bgra |
 | `zstr_audiotestsrc` | indev | `audio_test_src.c` | sine/noise waveforms |
-| `zstr_v4l2` | indev | `v4l2_source.c` | VIDIOC_EXPBUF DMABUF export + mock; fmts yuyv/nv12/nv16/420p/rgb24/bgr24/rgb32/bgr32 |
+| `zstr_v4l2` | indev | `v4l2_source.c` | VIDIOC_EXPBUF DMABUF export (`mmap-export`) + true `V4L2_MEMORY_DMABUF` import (`dmabuf` + `dmabuf_fds`, zero-copy side data `ZSTR_TAG_DMAB`) + mock; fmts yuyv/nv12/nv16/420p/rgb24/bgr24/rgb32/bgr32 |
 | `zstr_v4l2_sink` | outdev | `v4l2_sink.c` | same fmts; unsupported stream fmt fails fast |
 | `zstr_alsa` / `zstr_alsa_sink` | indev/outdev | `alsa_source.c` | non-blocking poll, xrun recovery, mock sine |
 
@@ -643,6 +643,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 option(ENABLE_JETSON "Enable NVIDIA Jetson NvBufSurface support" OFF)
 option(ENABLE_DANTE "Enable Dante DEP protocol support" ON)
+option(ENABLE_DISPLAY "Enable GL/X11 display sinks (glsink, gl_comp, x11sink)" ON)
 
 if(ENABLE_JETSON)
     add_compile_definitions(ENABLE_JETSON=1)
@@ -650,19 +651,35 @@ endif()
 
 # Find FFmpeg dependencies
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(AVUTIL REQUIRED libavutil)
-pkg_check_modules(AVCODEC REQUIRED libavcodec)
-pkg_check_modules(AVFORMAT REQUIRED libavformat)
-pkg_check_modules(AVFILTER REQUIRED libavfilter)
-pkg_check_modules(AVDEVICE REQUIRED libavdevice)
-pkg_check_modules(SWSCALE REQUIRED libswscale)
-pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+# Minimum FFmpeg 6.1 (Ubuntu 24.04): ch_layout, AVFrame.time_base, etc.
+pkg_check_modules(AVUTIL REQUIRED libavutil>=58)
+pkg_check_modules(AVCODEC REQUIRED libavcodec>=60)
+pkg_check_modules(AVFORMAT REQUIRED libavformat>=60)
+pkg_check_modules(AVFILTER REQUIRED libavfilter>=9)
+pkg_check_modules(AVDEVICE REQUIRED libavdevice>=60)
+pkg_check_modules(SWSCALE REQUIRED libswscale>=7)
+pkg_check_modules(SWRESAMPLE REQUIRED libswresample>=4)
 pkg_check_modules(ALSA REQUIRED alsa)
-pkg_check_modules(GL REQUIRED gl)
-pkg_check_modules(X11 REQUIRED x11)
+if(ENABLE_DISPLAY)
+    pkg_check_modules(GL REQUIRED gl)
+    pkg_check_modules(X11 REQUIRED x11)
+    add_compile_definitions(HAS_DISPLAY=1)
+else()
+    message(STATUS "Display sinks disabled (glsink, gl_comp, x11sink)")
+endif()
 pkg_check_modules(FREETYPE freetype2)
-find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
-find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
+# SRT via pkg-config first (cross-friendly: honors PKG_CONFIG_PATH into
+# sysroots/3rdparty); legacy host-path fallback otherwise.
+pkg_check_modules(SRT srt)
+if(NOT SRT_FOUND)
+    find_library(SRT_LIBRARIES NAMES srt-gnutls srt)
+    find_path(SRT_INCLUDE_DIRS NAMES srt/srt.h PATHS /usr/include /usr/local/include)
+endif()
+# OpenSSL backs SRT (and 3rdparty ships its own copy for cross).
+pkg_check_modules(SSL openssl)
+if(NOT SSL_FOUND)
+    find_library(SSL_LIBRARIES NAMES ssl crypto)
+endif()
 
 # SVT-JPEG-XS (ST 2110-22 software codec, optional)
 pkg_check_modules(SVT_JPEGXS SvtJpegxs)
@@ -702,6 +719,26 @@ include_directories(
     ${X11_INCLUDE_DIRS}
     ${FREETYPE_INCLUDE_DIRS}
     ${SRT_INCLUDE_DIRS}
+    ${SSL_INCLUDE_DIRS}
+)
+
+# Library directories: bare -l flags rely on the default search path, which
+# breaks with a custom PREFIX install (e.g. /opt/zff-ffmpeg on Kaggle) by
+# silently falling back to system libs. Emit -L for every dependency dir.
+link_directories(
+    ${AVUTIL_LIBRARY_DIRS}
+    ${AVCODEC_LIBRARY_DIRS}
+    ${AVFORMAT_LIBRARY_DIRS}
+    ${AVFILTER_LIBRARY_DIRS}
+    ${AVDEVICE_LIBRARY_DIRS}
+    ${SWSCALE_LIBRARY_DIRS}
+    ${SWRESAMPLE_LIBRARY_DIRS}
+    ${ALSA_LIBRARY_DIRS}
+    ${GL_LIBRARY_DIRS}
+    ${X11_LIBRARY_DIRS}
+    ${FREETYPE_LIBRARY_DIRS}
+    ${SRT_LIBRARY_DIRS}
+    ${SSL_LIBRARY_DIRS}
 )
 
 # Core SDK Library (libzff-core)
@@ -729,6 +766,8 @@ target_link_libraries(zff-core
     ${AVCODEC_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVFILTER_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
 )
 
 # Plugins Library (libzff-plugins)
@@ -743,10 +782,7 @@ set(PLUGINS_SOURCES
     src/plugins/devices/zstr_v4l2_sink.c
     src/plugins/devices/zstr_alsa_sink.c
     src/plugins/audio/zstr_amix.c
-    src/plugins/video/zstr_glsink.c
-    src/plugins/video/zstr_x11sink.c
     src/plugins/video/zstr_text_overlay.c
-    src/plugins/video/zstr_gl_comp.c
     src/plugins/streaming/zstr_net_source.c
     src/plugins/streaming/zstr_net_sink.c
     src/plugins/streaming/zstr_hls_sink.c
@@ -782,6 +818,14 @@ if(HAS_WEBRTC)
         src/plugins/streaming/zstr_webrtc_whep.c
     )
     add_compile_definitions(HAS_WEBRTC=1)
+endif()
+
+if(ENABLE_DISPLAY)
+    list(APPEND PLUGINS_SOURCES
+        src/plugins/video/zstr_glsink.c
+        src/plugins/video/zstr_x11sink.c
+        src/plugins/video/zstr_gl_comp.c
+    )
 endif()
 
 add_library(zff-plugins ${PLUGINS_SOURCES})
@@ -829,6 +873,8 @@ target_link_libraries(zff-plugins
     ${X11_LIBRARIES}
     ${FREETYPE_LIBRARIES}
     ${SRT_LIBRARIES}
+    $<$<BOOL:${SRT_FOUND}>:stdc++>
+    ${SSL_LIBRARIES}
     m
     pthread
 )
@@ -881,14 +927,17 @@ if(BUILD_TESTS)
     target_link_libraries(test_amix PRIVATE zff-plugins zff-core ${SWRESAMPLE_LIBRARIES} m)
     add_test(NAME test_amix COMMAND test_amix)
 
+if(ENABLE_DISPLAY)
     add_executable(test_glsink tests/test_glsink.c)
     target_link_libraries(test_glsink PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES})
     add_test(NAME test_glsink COMMAND test_glsink)
+endif()
 
     add_executable(test_text_overlay tests/test_text_overlay.c)
     target_link_libraries(test_text_overlay PRIVATE zff-plugins zff-core ${FREETYPE_LIBRARIES} m)
     add_test(NAME test_text_overlay COMMAND test_text_overlay)
 
+if(ENABLE_DISPLAY)
     add_executable(test_x11sink tests/test_x11sink.c)
     target_link_libraries(test_x11sink PRIVATE zff-plugins zff-core ${X11_LIBRARIES} ${SWSCALE_LIBRARIES})
     add_test(NAME test_x11sink COMMAND test_x11sink)
@@ -896,6 +945,7 @@ if(BUILD_TESTS)
     add_executable(test_gl_comp tests/test_gl_comp.c)
     target_link_libraries(test_gl_comp PRIVATE zff-plugins zff-core ${GL_LIBRARIES} ${X11_LIBRARIES} ${SWSCALE_LIBRARIES} m)
     add_test(NAME test_gl_comp COMMAND test_gl_comp)
+endif()
 
     add_executable(test_net tests/test_net.c)
     target_link_libraries(test_net PRIVATE zff-plugins zff-core pthread)
@@ -951,12 +1001,22 @@ if(BUILD_TESTS)
     target_link_libraries(test_srt PRIVATE zff-plugins zff-core ${SRT_LIBRARIES} pthread)
     add_test(NAME test_srt COMMAND test_srt)
 
-    add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
-    target_link_libraries(test_hwaccel_vaapi PRIVATE zff-plugins zff-core)
-    add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
+    # VAAPI test needs libva headers (absent on headless cross SDKs).
+    include(CheckIncludeFile)
+    check_include_file("va/va.h" HAVE_VA_H)
+    if(HAVE_VA_H)
+        add_executable(test_hwaccel_vaapi tests/test_hwaccel_vaapi.c)
+        # NOTE: links zff-core only (not zff-plugins): these tests exercise
+        # native libav* HW APIs and must not inherit the GL/X11 link closure,
+        # whose distro/NVIDIA skew breaks exe links on GPU boxes.
+        target_link_libraries(test_hwaccel_vaapi PRIVATE zff-core)
+        add_test(NAME test_hwaccel_vaapi COMMAND test_hwaccel_vaapi)
+    else()
+        message(STATUS "va/va.h not found, skipping test_hwaccel_vaapi")
+    endif()
 
     add_executable(test_hwaccel_cuda tests/test_hwaccel_cuda.c)
-    target_link_libraries(test_hwaccel_cuda PRIVATE zff-plugins zff-core)
+    target_link_libraries(test_hwaccel_cuda PRIVATE zff-core)
     add_test(NAME test_hwaccel_cuda COMMAND test_hwaccel_cuda)
 endif()
 
@@ -2850,6 +2910,7 @@ extern "C" {
 #define ZSTR_TAG_PTP   ((enum AVFrameSideDataType)MKTAG('P', 'T', 'P', 'T'))
 #define ZSTR_TAG_BBOX  ((enum AVFrameSideDataType)MKTAG('B', 'B', 'O', 'X'))
 #define ZSTR_TAG_USER  ((enum AVFrameSideDataType)MKTAG('Z', 'U', 'S', 'R'))
+#define ZSTR_TAG_DMAB  ((enum AVFrameSideDataType)MKTAG('D', 'M', 'A', 'B'))
 
 /* ── Global Discovery & Registration ─────────────────────────────────────── */
 
@@ -2976,6 +3037,40 @@ extern "C" {
 /* Forward declaration of NVIDIA Jetson surface */
 struct NvBufSurface;
 
+/* ── DRM fourcc constants (avoid pulling libdrm headers into the public API) ── */
+#define ZFF_DRM_FORMAT_NV12 0x3231564eu /* "NV12" */
+#define ZFF_DRM_FORMAT_NV16 0x3631564eu /* "NV16" */
+#define ZFF_DRM_FORMAT_NV21 0x3132564eu /* "NV21" */
+
+/**
+ * Per-plane layout for AVDRMFrameDescriptor layers when wrapping a dmabuf.
+ * object_index must be 0 (single-object buffers; zff core SDK owns one fd).
+ */
+typedef struct ZffDRMPlane {
+    int      object_index;
+    uint32_t offset; /**< byte offset of the plane inside the object */
+    uint32_t pitch;  /**< bytes per row */
+} ZffDRMPlane;
+
+/**
+ * DMABUF buffer info carried as FourCC side data (ZSTR_TAG_DMAB) on an
+ * AVPacket produced by zero-copy devices (e.g. zstr_v4l2 memory_type=dmabuf).
+ * Consumers unwrap the fd with zff_dmabuf_wrap_frame_planes() to get an
+ * AV_PIX_FMT_DRM_PRIME frame without any pixel copy.
+ */
+typedef struct ZffDMABufInfo {
+    int      fd;          /**< dma-buf file descriptor (owned by the packet) */
+    uint32_t size;        /**< dma-buf object size in bytes */
+    uint32_t bytesused;   /**< bytes actually filled by the producer */
+    int      width;
+    int      height;
+    uint32_t drm_format;  /**< ZFF_DRM_FORMAT_* (0 = generic/unknown) */
+    uint32_t y_offset;    /**< luma plane offset (0 for packed formats) */
+    uint32_t y_pitch;     /**< luma plane bytes-per-row */
+    uint32_t uv_offset;   /**< chroma plane offset (0 if not 2-plane) */
+    uint32_t uv_pitch;    /**< chroma plane bytes-per-row (0 if not 2-plane) */
+} ZffDMABufInfo;
+
 /**
  * Wrap a Jetson NvBufSurface into an AVFrame (format = AV_PIX_FMT_DRM_PRIME).
  * Manages the surface lifecycle using av_buffer_create.
@@ -2997,8 +3092,40 @@ struct NvBufSurface* zff_nvbuf_unwrap_frame(const AVFrame *frame);
 
 /**
  * Wrap an arbitrary Linux DMABUF file descriptor into an AVFrame.
+ *
+ * Plane layout is derived from drm_format when it is a known semi-planar
+ * format (ZFF_DRM_FORMAT_NV12/NV16: two planes, dense pitch == width),
+ * otherwise a single plane with pitch == width*4 is assumed. Use
+ * zff_dmabuf_wrap_frame_planes() for explicit control (padded pitches,
+ * non-zero offsets, other formats).
+ *
+ * The AVFrame's buffer ref owns the fd: it is closed when the frame is freed.
  */
 AVFrame* zff_dmabuf_wrap_frame(int dmabuf_fd, size_t size, int width, int height, uint32_t drm_format);
+
+/**
+ * Wrap a Linux DMABUF fd into an AVFrame with an explicit plane layout.
+ *
+ * @param planes     array of ZffDRMPlane (object_index must be 0), or NULL to
+ *                   fall back to a single plane with pitch == width*4.
+ * @param nb_planes  number of planes (1..4). Ignored if planes == NULL.
+ * Same fd ownership semantics as zff_dmabuf_wrap_frame().
+ */
+AVFrame* zff_dmabuf_wrap_frame_planes(int dmabuf_fd, size_t size, int width, int height,
+                                      uint32_t drm_format,
+                                      const ZffDRMPlane *planes, int nb_planes);
+
+/**
+ * Attach DMABUF buffer info to an AVPacket using FourCC side data (ZSTR_TAG_DMAB).
+ * Used by zero-copy devices so the fd can ride along with the packet.
+ */
+int zff_packet_set_dmabuf(AVPacket *pkt, const ZffDMABufInfo *info);
+
+/**
+ * Retrieve DMABUF buffer info from an AVPacket.
+ * Returns 0 and fills *out on success, negative AVERROR if absent.
+ */
+int zff_packet_get_dmabuf(const AVPacket *pkt, ZffDMABufInfo *out);
 
 #ifdef __cplusplus
 }

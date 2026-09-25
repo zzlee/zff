@@ -5,6 +5,7 @@
 #include "zff/plugins/zstr_v4l2.h"
 #include "zff/zff_core.h"
 #include "zff/zff_time.h"
+#include "zff/zff_hw.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,9 @@
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 
+#include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/parseutils.h>
 
@@ -32,7 +35,8 @@ typedef struct V4L2DeviceContext {
     char *video_size;
     char *framerate;
     char *pixel_format;
-    char *memory_type; /* "mmap", "dmabuf", "mmap-export" */
+    char *memory_type;   /* "mmap", "dmabuf", "mmap-export" */
+    char *dmabuf_fds;    /* comma-separated dma-buf fds to import (V4L2_MEMORY_DMABUF) */
     int is_mock;
     int64_t num_frames;
     int realtime;
@@ -51,6 +55,7 @@ typedef struct V4L2DeviceContext {
         size_t length;
     } buffers[MAX_V4L2_BUFFERS];
     int exported_fds[MAX_V4L2_BUFFERS];
+    int imported_fds[MAX_V4L2_BUFFERS]; /* fds we queued in DMABUF import mode */
     uint32_t nb_buffers;
     int streaming;
 
@@ -78,6 +83,7 @@ static const AVOption zstr_v4l2_options[] = {
     { "framerate",    "Capture framerate",                     OFFSET(framerate),    AV_OPT_TYPE_STRING, { .str = "30" },          0, 0, DEC },
     { "pixel_format", "Pixel format (yuyv422, yuv420p/i420, nv12, nv16, rgb24, bgr24, rgb32, bgr32)", OFFSET(pixel_format), AV_OPT_TYPE_STRING, { .str = "yuyv422" },     0, 0, DEC },
     { "memory_type",  "Memory mode (mmap, dmabuf, mmap-export)", OFFSET(memory_type), AV_OPT_TYPE_STRING, { .str = "mmap" },        0, 0, DEC },
+    { "dmabuf_fds",   "Comma-separated dma-buf fds to import (memory_type=dmabuf)", OFFSET(dmabuf_fds), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, DEC },
     { "is_mock",      "Force synthetic mock fallback",         OFFSET(is_mock),      AV_OPT_TYPE_BOOL,   { .i64 = 0 },             0, 1, DEC },
     { "realtime",     "Real-time clock pacing (1=on, 0=burst)",OFFSET(realtime),     AV_OPT_TYPE_BOOL,   { .i64 = 1 },             0, 1, DEC },
     { "num_frames",   "Max frames to capture (0=infinite)",    OFFSET(num_frames),   AV_OPT_TYPE_INT64,  { .i64 = 0 },             0, INT64_MAX, DEC },
@@ -173,6 +179,10 @@ static void close_hardware_v4l2(V4L2DeviceContext *ctx) {
             close(ctx->exported_fds[i]);
             ctx->exported_fds[i] = -1;
         }
+        if (ctx->imported_fds[i] >= 0) {
+            close(ctx->imported_fds[i]);
+            ctx->imported_fds[i] = -1;
+        }
         if (ctx->buffers[i].start && ctx->buffers[i].start != MAP_FAILED) {
             munmap(ctx->buffers[i].start, ctx->buffers[i].length);
             ctx->buffers[i].start = NULL;
@@ -182,6 +192,58 @@ static void close_hardware_v4l2(V4L2DeviceContext *ctx) {
     if (ctx->fd >= 0) {
         close(ctx->fd);
         ctx->fd = -1;
+    }
+}
+
+static int is_dmabuf_import(V4L2DeviceContext *ctx) {
+    return ctx->memory_type && strcmp(ctx->memory_type, "dmabuf") == 0;
+}
+
+/* Parse "3,4,5" into fds[]; returns count (0 if none/invalid). */
+static int parse_fd_list(const char *s, int *fds, int max) {
+    if (!s || !s[0] || max < 1) return 0;
+    char *copy = av_strdup(s);
+    if (!copy) return 0;
+    int n = 0;
+    char *tok = strtok(copy, ",");
+    while (tok && n < max) {
+        long v = strtol(tok, NULL, 10);
+        if (v >= 0) fds[n++] = (int)v;
+        tok = strtok(NULL, ",");
+    }
+    av_free(copy);
+    return n;
+}
+
+/* Fill dmabuf side-data info for the current format/layout. */
+static void fill_dmabuf_info(ZffDMABufInfo *info, V4L2DeviceContext *ctx,
+                             int fd, uint32_t bytesused) {
+    memset(info, 0, sizeof(*info));
+    info->fd = fd;
+    info->size = (uint32_t)ctx->frame_size;
+    info->bytesused = bytesused;
+    info->width = ctx->width;
+    info->height = ctx->height;
+
+    if (ctx->av_pix_fmt == AV_PIX_FMT_NV12) {
+        info->drm_format = ZFF_DRM_FORMAT_NV12;
+        info->y_offset   = 0;
+        info->y_pitch    = (uint32_t)ctx->width;
+        info->uv_offset  = (uint32_t)((size_t)ctx->width * ctx->height);
+        info->uv_pitch   = (uint32_t)ctx->width;
+    } else if (ctx->av_pix_fmt == AV_PIX_FMT_NV16) {
+        info->drm_format = ZFF_DRM_FORMAT_NV16;
+        info->y_offset   = 0;
+        info->y_pitch    = (uint32_t)ctx->width;
+        info->uv_offset  = (uint32_t)((size_t)ctx->width * ctx->height);
+        info->uv_pitch   = (uint32_t)ctx->width;
+    } else {
+        /* Generic packed layout, best effort: 4 bytes per pixel row */
+        info->drm_format = 0;
+        info->y_offset   = 0;
+        info->y_pitch    = (uint32_t)ctx->width * 4;
+        info->uv_offset  = 0;
+        info->uv_pitch   = 0;
     }
 }
 
@@ -218,9 +280,14 @@ static void* v4l2_worker(void *arg) {
 
         AVPacket *pkt = av_packet_alloc();
         if (!pkt) break;
-        if (av_new_packet(pkt, ctx->frame_size) < 0) {
-            av_packet_free(&pkt);
-            break;
+
+        int dmabuf_mode = is_dmabuf_import(ctx);
+        if (!dmabuf_mode) {
+            /* Payload-carrying modes (mmap / mmap-export): reserve the copy target. */
+            if (av_new_packet(pkt, ctx->frame_size) < 0) {
+                av_packet_free(&pkt);
+                break;
+            }
         }
 
         if (!ctx->is_mock && ctx->fd >= 0) {
@@ -234,18 +301,34 @@ static void* v4l2_worker(void *arg) {
 
             struct v4l2_buffer buf = {0};
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buf.memory = V4L2_MEMORY_MMAP;
+            buf.memory = dmabuf_mode ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
 
             if (ioctl(ctx->fd, VIDIOC_DQBUF, &buf) < 0) {
                 av_packet_free(&pkt);
                 continue;
             }
 
-            memcpy(pkt->data, ctx->buffers[buf.index].start,
-                   buf.bytesused < (uint32_t)ctx->frame_size ? buf.bytesused : (uint32_t)ctx->frame_size);
+            if (dmabuf_mode) {
+                /* Zero-copy: the driver wrote IN PLACE into our dma-buf fd.
+                 * Deliver the fd via FourCC side data, no pixel copy. */
+                ZffDMABufInfo info;
+                fill_dmabuf_info(&info, ctx, ctx->imported_fds[buf.index], buf.bytesused);
+                zff_packet_set_dmabuf(pkt, &info);
+                /* Requeue the same imported fd for the next capture. */
+                struct v4l2_buffer q = {0};
+                q.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                q.memory = V4L2_MEMORY_DMABUF;
+                q.index = buf.index;
+                q.m.fd = ctx->imported_fds[buf.index];
+                q.length = (uint32_t)ctx->buffers[buf.index].length;
+                ioctl(ctx->fd, VIDIOC_QBUF, &q);
+            } else {
+                memcpy(pkt->data, ctx->buffers[buf.index].start,
+                       buf.bytesused < (uint32_t)ctx->frame_size ? buf.bytesused : (uint32_t)ctx->frame_size);
 
-            /* Requeue buffer */
-            ioctl(ctx->fd, VIDIOC_QBUF, &buf);
+                /* Requeue buffer */
+                ioctl(ctx->fd, VIDIOC_QBUF, &buf);
+            }
         } else {
             /* Synthetic mock fallback with real-time pacing */
             if (ctx->realtime) {
@@ -257,7 +340,19 @@ static void* v4l2_worker(void *arg) {
                 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
             }
 
-            render_mock_pattern(ctx, pkt->data, (int)frame_count);
+            if (dmabuf_mode) {
+                /* Mock DMABUF import: render into the memfd-backed buffer and
+                 * hand the fd out via side data (no payload copy). */
+                int idx = (int)(frame_count % ctx->nb_buffers);
+                if (ctx->buffers[idx].start) {
+                    render_mock_pattern(ctx, ctx->buffers[idx].start, (int)frame_count);
+                }
+                ZffDMABufInfo info;
+                fill_dmabuf_info(&info, ctx, ctx->exported_fds[idx], ctx->frame_size);
+                zff_packet_set_dmabuf(pkt, &info);
+            } else {
+                render_mock_pattern(ctx, pkt->data, (int)frame_count);
+            }
         }
 
         /* Set PTS & FourCC PTP Metadata */
@@ -288,6 +383,7 @@ static void* v4l2_worker(void *arg) {
 static int init_hardware_or_mock_v4l2(V4L2DeviceContext *ctx) {
     for (int i = 0; i < MAX_V4L2_BUFFERS; i++) {
         ctx->exported_fds[i] = -1;
+        ctx->imported_fds[i] = -1;
     }
 
     if (!ctx->is_mock) {
@@ -323,7 +419,67 @@ static int init_hardware_or_mock_v4l2(V4L2DeviceContext *ctx) {
         }
     }
 
-    if (!ctx->is_mock && ctx->fd >= 0) {
+    /* ── DMABUF import mode (V4L2_MEMORY_DMABUF) ────────────────────────────
+     * The application (or engine) provides dma-buf fds it already owns (e.g.
+     * VAAPI surfaces exported via zff/vaExportSurfaceHandle). The driver
+     * writes captured frames IN PLACE into those fds — zero pixel copies.
+     * The fds ride along with each AVPacket as ZSTR_TAG_DMAB side data. */
+    if (!ctx->is_mock && ctx->fd >= 0 && is_dmabuf_import(ctx)) {
+        int nfds = parse_fd_list(ctx->dmabuf_fds, ctx->imported_fds, MAX_V4L2_BUFFERS);
+        if (nfds < 1) {
+            /* No import fds supplied: cannot do real DMABUF import. */
+            close(ctx->fd);
+            ctx->fd = -1;
+            ctx->is_mock = 1;
+        } else {
+            struct v4l2_requestbuffers req = {0};
+            req.count = nfds;
+            req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            req.memory = V4L2_MEMORY_DMABUF;
+
+            if (ioctl(ctx->fd, VIDIOC_REQBUFS, &req) < 0 || req.count < (uint32_t)nfds) {
+                close_hardware_v4l2(ctx);
+                ctx->is_mock = 1;
+            } else {
+                ctx->nb_buffers = nfds;
+                int ok = 1;
+                for (uint32_t i = 0; i < ctx->nb_buffers && ok; i++) {
+                    struct v4l2_buffer buf = {0};
+                    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    buf.memory = V4L2_MEMORY_DMABUF;
+                    buf.index = i;
+
+                    if (ioctl(ctx->fd, VIDIOC_QUERYBUF, &buf) < 0) {
+                        ok = 0;
+                        break;
+                    }
+                    ctx->buffers[i].length = buf.length;
+
+                    buf.m.fd = ctx->imported_fds[i];
+                    buf.length = ctx->buffers[i].length;
+                    if (ioctl(ctx->fd, VIDIOC_QBUF, &buf) < 0) {
+                        ok = 0;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    close_hardware_v4l2(ctx);
+                    ctx->is_mock = 1;
+                } else {
+                    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    if (ioctl(ctx->fd, VIDIOC_STREAMON, &type) == 0) {
+                        ctx->streaming = 1;
+                    } else {
+                        close_hardware_v4l2(ctx);
+                        ctx->is_mock = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /* ── MMAP / MMAP-EXPORT modes (skipped for DMABUF import) ────────────── */
+    if (!ctx->is_mock && ctx->fd >= 0 && !is_dmabuf_import(ctx)) {
         struct v4l2_requestbuffers req = {0};
         req.count = 4;
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -356,9 +512,8 @@ static int init_hardware_or_mock_v4l2(V4L2DeviceContext *ctx) {
                     break;
                 }
 
-                /* VIDIOC_EXPBUF DMABUF Export */
-                if (strcmp(ctx->memory_type, "mmap-export") == 0 ||
-                    strcmp(ctx->memory_type, "dmabuf") == 0) {
+                /* VIDIOC_EXPBUF DMABUF Export (mmap-export mode only) */
+                if (strcmp(ctx->memory_type, "mmap-export") == 0) {
                     struct v4l2_exportbuffer expbuf = {0};
                     expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                     expbuf.index = i;

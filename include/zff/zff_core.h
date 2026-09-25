@@ -18,6 +18,7 @@ extern "C" {
 #define ZSTR_TAG_PTP   ((enum AVFrameSideDataType)MKTAG('P', 'T', 'P', 'T'))
 #define ZSTR_TAG_BBOX  ((enum AVFrameSideDataType)MKTAG('B', 'B', 'O', 'X'))
 #define ZSTR_TAG_USER  ((enum AVFrameSideDataType)MKTAG('Z', 'U', 'S', 'R'))
+#define ZSTR_TAG_DMAB  ((enum AVFrameSideDataType)MKTAG('D', 'M', 'A', 'B'))
 
 /* ── Global Discovery & Registration ─────────────────────────────────────── */
 

@@ -82,7 +82,7 @@ Devices (`libavdevice`-style indev/outdev, `src/plugins/devices/`):
 |---|---|---|---|
 | `zstr_videotestsrc` | indev | `video_test_src.c` | bars/gradient/checker/noise/black; `pixel_format` yuv420p/i420/yv12→420P,nv12,nv16,yuyv422,rgb24,bgr24,rgba,bgra |
 | `zstr_audiotestsrc` | indev | `audio_test_src.c` | sine/noise waveforms |
-| `zstr_v4l2` | indev | `v4l2_source.c` | VIDIOC_EXPBUF DMABUF export + mock; fmts yuyv/nv12/nv16/420p/rgb24/bgr24/rgb32/bgr32 |
+| `zstr_v4l2` | indev | `v4l2_source.c` | VIDIOC_EXPBUF DMABUF export (`mmap-export`) + true `V4L2_MEMORY_DMABUF` import (`dmabuf` + `dmabuf_fds`, zero-copy side data `ZSTR_TAG_DMAB`) + mock; fmts yuyv/nv12/nv16/420p/rgb24/bgr24/rgb32/bgr32 |
 | `zstr_v4l2_sink` | outdev | `v4l2_sink.c` | same fmts; unsupported stream fmt fails fast |
 | `zstr_alsa` / `zstr_alsa_sink` | indev/outdev | `alsa_source.c` | non-blocking poll, xrun recovery, mock sine |
 
